@@ -168,6 +168,7 @@ jobs:
       - run: zig/zig build fuzz_ewah -- --seed 123
       - run: zig/zig build fuzz_lsm_segmented_array -- --seed 123
       - run: zig/zig build fuzz_lsm_tree -- --seed 123 --events-max 400
+      - run: zig/zig build fuzz_lsm_manifest -- --seed 123 --events-max 400
       - run: zig/zig build fuzz_vsr_journal_format -- --seed 123
       - run: zig/zig build fuzz_vsr_superblock -- --seed 123 --events-max 3
       - run: zig/zig build fuzz_vsr_superblock_quorums -- --seed 123
