@@ -18,6 +18,7 @@ const ManifestLogType = @import("manifest_log.zig").ManifestLogType;
 const ScanBufferPool = @import("scan_buffer.zig").ScanBufferPool;
 const CompactionInterfaceType = @import("compaction.zig").CompactionInterfaceType;
 const CompactionBlocks = @import("compaction.zig").CompactionBlocks;
+const BlipStage = @import("compaction.zig").BlipStage;
 
 const table_count_max = @import("tree.zig").table_count_max;
 
@@ -148,6 +149,7 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
     };
 
     const Grid = GridType(_Storage);
+
     // TODO: With all this trouble, why not just store the compaction memory here and move it out of Tree entirely...
     const CompactionInterface = CompactionInterfaceType(Grid, _tree_infos);
 
@@ -173,7 +175,7 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
             const PipelineSlot = struct {
                 interface: CompactionInterface,
                 pipeline: *CompactionPipeline,
-                active_operation: enum { read, merge, write },
+                active_operation: BlipStage,
                 compaction_index: usize,
             };
 
@@ -183,7 +185,7 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
             compactions: stdx.BoundedArray(CompactionInterface, compaction_count) = .{},
             bar_active_compactions: CompactionBitset = CompactionBitset.initEmpty(),
             beat_active_compactions: CompactionBitset = CompactionBitset.initEmpty(),
-            beat_acquired_compactions: CompactionBitset = CompactionBitset.initEmpty(),
+            beat_reserved_compactions: CompactionBitset = CompactionBitset.initEmpty(),
 
             beat_exhausted: bool = false,
 
@@ -238,16 +240,14 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                 allocator.free(self.compaction_blocks);
             }
 
+            // FIXME: Currently the split by a / b is equal, but it shouldn't be for max performance.
             /// Our input and output blocks (excluding index blocks for now) are split two ways. First, equally by pipeline stage
-            /// then by table a / table b. FIXME: Currently the split by a / b is equal, but it shouldn't be for max performance.
+            /// then by table a / table b:
             /// -------------------------------------------------------------
             /// | Pipeline 0                  | Pipeline 1                  |
+            /// |-----------------------------|-----------------------------|
             /// | Table A     | Table B       | Table A     | Table B       |
             /// -------------------------------------------------------------
-            /// Here's a complicating factor: to ensure the jigsaw blocks line up nicely, this memory actually needs to be managed
-            /// by the forest.
-            /// Eg, once we've done our final write(1), we know we can use read(0) memory...
-            /// This can be called once at the start of every bar.
             fn divide_blocks(self: *CompactionPipeline) CompactionBlocks {
                 var minimum_block_count: u64 = 0;
                 // We need a minimum of 2 input data blocks; one from each table.
@@ -273,33 +273,33 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                 // // per beat would then be divided by beat. _however_ the minimums won't change!
                 // // Minimum of 2, max lsm_growth_factor+1. Replaces index_block_a and index_block_b too.
                 // // Output index blocks are explicitly handled in bar_setup_budget.
-                // input_index_blocks: []BlockPtr,
+                // source_index_blocks: []BlockPtr,
                 // // Minimum of 2, one from each table. Max would be max possible data blocks in lsm_growth_factor+1 tables.
-                // input_data_blocks: []BlockPtr,
+                // source_value_blocks: []BlockPtr,
                 // // Minimum of 1, max would be max possible data blocks in lsm_growth_factor+1 tables.
-                // output_data_blocks: []BlockPtr,
+                // target_value_blocks: []BlockPtr,
 
                 const blocks = self.compaction_blocks;
 
                 assert(blocks.len >= minimum_block_count);
 
-                const input_index_blocks = blocks[0..9];
+                const source_index_blocks = blocks[0..9];
 
-                const input_data_pipeline_0_level_a = blocks[9..][0..1];
-                const input_data_pipeline_0_level_b = blocks[10..][0..1];
-                const input_data_pipeline_1_level_a = blocks[20..][0..25];
-                const input_data_pipeline_1_level_b = blocks[50..][0..25];
+                const source_value_pipeline_0_level_a = blocks[9..][0..1];
+                const source_value_pipeline_0_level_b = blocks[10..][0..1];
+                const source_value_pipeline_1_level_a = blocks[20..][0..25];
+                const source_value_pipeline_1_level_b = blocks[50..][0..25];
 
-                const output_data_pipeline_0 = blocks[100..][0..300];
-                const output_data_pipeline_1 = blocks[500..][0..300];
+                const output_value_pipeline_0 = blocks[100..][0..300];
+                const output_value_pipeline_1 = blocks[500..][0..300];
 
-                const input_data_blocks = .{ .{ input_data_pipeline_0_level_a, input_data_pipeline_0_level_b }, .{ input_data_pipeline_1_level_a, input_data_pipeline_1_level_b } };
-                const output_data_blocks = .{ output_data_pipeline_0, output_data_pipeline_1 };
+                const source_value_blocks = .{ .{ source_value_pipeline_0_level_a, source_value_pipeline_0_level_b }, .{ source_value_pipeline_1_level_a, source_value_pipeline_1_level_b } };
+                const target_value_blocks = .{ output_value_pipeline_0, output_value_pipeline_1 };
 
                 return .{
-                    .input_index_blocks = input_index_blocks,
-                    .input_data_blocks = input_data_blocks,
-                    .output_data_blocks = output_data_blocks,
+                    .source_index_blocks = source_index_blocks,
+                    .source_value_blocks = source_value_blocks,
+                    .target_value_blocks = target_value_blocks,
                 };
             }
 
@@ -340,8 +340,8 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                     if (!self.bar_active_compactions.isSet(i)) continue;
 
                     // Set up the beat depending on what buffers we have available.
-                    self.beat_acquired_compactions.set(i);
-                    compaction.beat_grid_acquire();
+                    self.beat_reserved_compactions.set(i);
+                    compaction.beat_grid_reserve();
                 }
 
                 self.callback = callback;
@@ -544,15 +544,15 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
 
                     // We need to run this for all compactions that ran acquire - even if they transitioned to being finished,
                     // so we can't just use bar_active_compactions.
-                    if (!self.beat_acquired_compactions.isSet(i)) continue;
+                    if (!self.beat_reserved_compactions.isSet(i)) continue;
 
                     // CompactionInterface internally stores a pointer to the real Compaction
                     // interface, so by-value should be OK, but we're a bit all over the place.
                     self.compactions.slice()[i].beat_grid_forfeit();
-                    self.beat_acquired_compactions.unset(i);
+                    self.beat_reserved_compactions.unset(i);
                 }
 
-                assert(self.beat_acquired_compactions.count() == 0);
+                assert(self.beat_reserved_compactions.count() == 0);
             }
         };
 
@@ -565,8 +565,7 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
             },
         } = null,
 
-        // FIXME: Bad name, this is manifest + pipeline.
-        compactions_running: usize = 0,
+        compaction_progress: enum { idle, trees_or_manifest, trees_and_manifest } = .idle,
 
         grid: *Grid,
         grooves: Grooves,
@@ -747,8 +746,7 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                         var compaction = &tree.compactions[level_b];
 
                         // This will return how many compactions and stuff this level needs to do...
-                        const maybe_info = compaction.bar_setup(tree, op);
-                        if (maybe_info) |info| {
+                        if (compaction.bar_setup(tree, op)) |info| {
                             // FIXME: Assert len?
                             forest.compaction_pipeline.compactions.append_assume_capacity(CompactionInterface.init(info, compaction));
                             std.log.info("Target Level: {}, Tree: {s}@{}: {}", .{ level_b, tree.config.name, op, info });
@@ -765,18 +763,20 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
 
             // Compaction only starts > lsm_batch_multiple because nothing compacts in the first bar.
             assert(op >= constants.lsm_batch_multiple or forest.compaction_pipeline.compactions.count() == 0);
+            assert(forest.compaction_progress == .idle);
 
-            forest.compactions_running += 1;
+            forest.compaction_progress = .trees_or_manifest;
             forest.compaction_pipeline.beat(forest, op, compact_callback);
 
             // Manifest log compaction. Run on the last beat of the bar.
-            // FIXME: Figure out a plan wrt the pacing here. Putting it on the last beat kinda sorta balances out, because we expect
-            // to naturally do less other compaction work on the last beat.
+            // TODO: Figure out a plan wrt the pacing here. Putting it on the last beat kinda-sorta
+            // balances out, because we expect to naturally do less other compaction work on the
+            // last beat.
             // The first bar has no manifest compaction.
             if (last_beat and op > constants.lsm_batch_multiple) {
                 forest.manifest_log_progress = .compacting;
                 forest.manifest_log.compact(compact_manifest_log_callback, op);
-                forest.compactions_running += 1;
+                forest.compaction_progress = .trees_and_manifest;
             } else {
                 assert(forest.manifest_log_progress == .idle);
             }
@@ -784,12 +784,17 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
 
         fn compact_callback(forest: *Forest) void {
             assert(forest.progress.? == .compact);
-            std.log.info("Entering compact_callback, running is: {} before decrement", .{forest.compactions_running});
-            forest.compactions_running -= 1;
-            if (forest.compactions_running > 0) {
+            assert(forest.compaction_progress != .idle);
+
+            if (forest.compaction_progress == .trees_and_manifest)
+                assert(forest.manifest_log_progress != .idle);
+
+            forest.compaction_progress = if (forest.compaction_progress == .trees_and_manifest) .trees_or_manifest else .idle;
+
+            if (forest.compaction_progress != .idle) {
                 return;
             }
-            // assert(forest.manifest_log_progress != .idle);
+
             forest.verify_table_extents();
 
             const progress = &forest.progress.?.compact;
@@ -824,9 +829,7 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                 @field(forest.grooves, field.name).compact(op);
             }
 
-            // // On the last beat of the bar, make sure that manifest log compaction is finished.
-            // if (half_bar_end and forest.manifest_log_progress == .compacting) return;
-            // FIXME: Do we compact_end the manifest before or after pipeline - keep reverse style.
+            // On the last beat of the bar, make sure that manifest log compaction is finished.
             if (last_beat) {
                 switch (forest.manifest_log_progress) {
                     .idle => {},

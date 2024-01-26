@@ -33,10 +33,10 @@ pub fn TableMemoryType(comptime Table: type) type {
 
                     // Our output must be strictly increasing.
                     // An output length of 1 is always strictly increasing.
-                    const verify_iterator = Iterator{ .table_memory = table_memory };
-                    var value = verify_iterator.next();
+                    var verify_iterator = Iterator{ .table_memory = table_memory, .source_index = source_index };
+                    var value = verify_iterator.next().?;
                     while (verify_iterator.next()) |value_next| {
-                        assert(key_from_value(value_next) > key_from_value(value));
+                        assert(key_from_value(&value_next) > key_from_value(&value));
                         value = value_next;
                     }
                 }
