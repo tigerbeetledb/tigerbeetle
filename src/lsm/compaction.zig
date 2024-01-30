@@ -239,14 +239,20 @@ pub fn CompactionType(
             }
 
             pub fn next(self: *ValueBlockIterator) ?Table.Value {
-                if (self.source_index == self.values.len) {
+                if (self.source_index == self.values.len)
                     return null;
-                }
 
                 const val = self.values[self.source_index];
                 self.source_index += 1;
 
                 return val;
+            }
+
+            pub fn peek(self: *const ValueBlockIterator) ?Table.Value {
+                if (self.source_index == self.values.len)
+                    return null;
+
+                return self.values[self.source_index];
             }
 
             pub fn count(self: *const ValueBlockIterator) usize {
@@ -294,6 +300,12 @@ pub fn CompactionType(
             pub fn next(self: *UnifiedIterator) ?Table.Value {
                 return switch (self.dispatcher) {
                     inline else => |*iterator_impl| iterator_impl.next(),
+                };
+            }
+
+            pub fn peek(self: *UnifiedIterator) ?Table.Value {
+                return switch (self.dispatcher) {
+                    inline else => |*iterator_impl| iterator_impl.peek(),
                 };
             }
 
@@ -401,6 +413,10 @@ pub fn CompactionType(
             }) = .{},
 
             table_builder: Table.Builder = .{},
+
+            // Keep track of the last key from table a and b respectively. Used to assert we are
+            // processing data in sequential order and not missing anything.
+            // last_blip_merge_keys: [2]?Key = .{ null, null },
         };
 
         const Beat = struct {
@@ -565,9 +581,6 @@ pub fn CompactionType(
         tree_config: Tree.Config,
         level_b: u8,
         grid: *Grid,
-
-        // Allocated during `init`.
-        last_keys_in: [2]?Key = .{ null, null },
 
         // Populated by {bar,beat}_setup.
         bar: ?Bar,
@@ -1034,6 +1047,7 @@ pub fn CompactionType(
                 const data_block_addresses = index_schema.data_addresses_used(index_block);
                 const data_block_checksums = index_schema.data_checksums_used(index_block);
 
+                std.log.info(".... this bar.current_table_b_index_block_index({}) has {} used value blocks", .{ bar.current_table_b_index_block_index, data_blocks_used });
                 // Try read in as many value blocks as this index block has...
                 while (data_blocks_read_b < data_blocks_used) {
                     beat.grid_reads[read_target].target = compaction;
@@ -1104,11 +1118,11 @@ pub fn CompactionType(
         }
 
         fn blip_read_next_tick(next_tick: *Grid.NextTick) void {
-            const read_context: *?Beat.Read = @ptrCast(@fieldParentPtr(Beat.Read, "next_tick", next_tick));
-            const beat = @fieldParentPtr(Beat, "read", read_context);
+            const read: *?Beat.Read = @ptrCast(@fieldParentPtr(Beat.Read, "next_tick", next_tick));
+            const beat = @fieldParentPtr(Beat, "read", read);
 
-            const duration = read_context.*.?.timer.read();
-            log.info("blip_read({}): Took {} to read all blocks - {}", .{ beat.read_split, std.fmt.fmtDuration(duration), read_context.*.?.timer_read });
+            const duration = read.*.?.timer.read();
+            log.info("blip_read({}): Took {} to read all blocks - {}", .{ beat.read_split, std.fmt.fmtDuration(duration), read.*.?.timer_read });
 
             beat.deactivate_and_assert_and_callback(.read, null, null);
         }
@@ -1174,16 +1188,22 @@ pub fn CompactionType(
             }
         }
 
-        /// Perform CPU merge work, to transform our input tables to our output tables.
-        /// This has a data dependency on both the read buffers and the write buffers for the current
-        /// split.
+        /// Perform CPU merge work, to transform our source tables to our target tables.
+        /// This has a data dependency on both the read buffers and the write buffers for the
+        /// active split.
         ///
-        // A blip is over when one of the following condition are met, considering we don't want to output partial data blocks unless we really really have to:
-        // * We have no more input remaining, at all - the bar is done. This will likely result in a partially full data block.
-        // * We have no more output data blocks remaining - we might need more blips, but that's up to the forest to orchestrate.
-        // * We have no more output index blocks remaining - we might have a partial data block here, but that's OK.
-        // * We have no more input blocks remaining:
-        //   * FIXME: Flesh out the cases here
+        /// blip_merge is also responsible for signalling when to stop blipping entirely. A
+        /// sequence of blips is over when one of the following condition are met, considering we
+        /// don't want to output partial value blocks unless we really really have to:
+        ///
+        /// * We have reached our per_beat_input_goal. Finish up the next value block, and we're
+        ///   done.
+        /// * We have no more source values remaining, at all - the bar is done. This will likely
+        ///   result in a partially full value block, but that's OK (end of a table).
+        /// * We have no more output value blocks remaining in our buffer - we might need more
+        ///   blips, but that's up to the forest to orchestrate.
+        /// * We have no more output index blocks remaining in our buffer - we might have a partial
+        ///   value block here, but that's OK (end of a table).
         pub fn blip_merge(compaction: *Compaction, callback: BlipCallback, ptr: *anyopaque) void {
             assert(compaction.bar != null);
             assert(compaction.beat != null);
@@ -1212,6 +1232,16 @@ pub fn CompactionType(
 
                 // Loop through the CPU work until we have nothing left.
                 while (values_in_a_len > 0 or values_in_b_len > 0) {
+                    // FIXME: We can store our key here (or even a full value) across blips, to assert we're starting
+                    // from the correct place each time!
+                    // const peek_key_a = if (values_in[0].peek()) |value| key_from_value(&value) else null;
+                    // const peek_key_b = if (values_in[1].peek()) |value| key_from_value(&value) else null;
+                    // assert(bar.last_blip_merge_keys[0] == null or bar.last_blip_merge_keys[0] == peek_key_a);
+                    // assert(bar.last_blip_merge_keys[1] == null or bar.last_blip_merge_keys[1] == peek_key_b);
+
+                    std.log.info(">>>>>>>>>>>>> Merge a starting on: {?}", .{values_in[0].peek()});
+                    std.log.info(">>>>>>>>>>>>> Merge b starting on: {?}", .{values_in[1].peek()});
+
                     log.info("blip_merge({}): values_a: {} and values_b: {}", .{ beat.merge_split, values_in_a_len, values_in_b_len });
 
                     // Set the index block if needed.
@@ -1247,7 +1277,7 @@ pub fn CompactionType(
                             values_in[0].copy(&bar.table_builder);
                         }
                     } else {
-                        merge_fn(&bar.table_builder, &values_in, bar.drop_tombstones);
+                        merge_values(&bar.table_builder, &values_in, bar.drop_tombstones);
                     }
 
                     // FIXME: Update these in a nicer way...
@@ -1257,6 +1287,12 @@ pub fn CompactionType(
                     // Save our iterator position, if they still had any values left.
                     bar.current_block_a_index = if (values_in_a_len_new > 0) values_in[0].get_source_index() else 0;
                     bar.current_block_b_index = if (values_in_b_len_new > 0) values_in[1].get_source_index() else 0;
+
+                    std.log.info(">>>>>>>>>>>>> Merge a ending on: {?}", .{values_in[0].peek()});
+                    std.log.info(">>>>>>>>>>>>> Merge b ending on: {?}", .{values_in[1].peek()});
+
+                    // bar.last_blip_merge_keys[0] = if (values_in[0].peek()) |value| key_from_value(&value) else null;
+                    // bar.last_blip_merge_keys[1] = if (values_in[1].peek()) |value| key_from_value(&value) else null;
 
                     beat.input_values_processed += (values_in_a_len - values_in_a_len_new) + (values_in_b_len - values_in_b_len_new);
                     values_in_a_len = values_in_a_len_new;
@@ -1416,6 +1452,7 @@ pub fn CompactionType(
                 log.info("blip_write({}): Issuing an index write for [{}][{}] - {*}", .{ beat.write_split, bar.output_index_block_split, i, block.* });
 
                 beat.grid_writes[writes_issued].target = compaction;
+                beat.grid_writes[writes_issued].hack = writes_issued;
                 write.pending_writes += 1;
                 compaction.grid.create_block(blip_write_callback, &beat.grid_writes[writes_issued].write, block);
                 writes_issued += 1;
@@ -1433,6 +1470,7 @@ pub fn CompactionType(
                 log.info("blip_write({}): Issuing a data write for [{}][{}]", .{ beat.write_split, beat.write_split, i });
 
                 beat.grid_writes[writes_issued].target = compaction;
+                beat.grid_writes[writes_issued].hack = writes_issued;
                 write.pending_writes += 1;
                 compaction.grid.create_block(blip_write_callback, &beat.grid_writes[writes_issued].write, block);
                 writes_issued += 1;
@@ -1459,8 +1497,9 @@ pub fn CompactionType(
         }
 
         fn blip_write_callback(grid_write: *Grid.Write) void {
+            const fat_write = @fieldParentPtr(Grid.FatWrite, "write", grid_write);
             const compaction: *Compaction = @alignCast(
-                @ptrCast(@fieldParentPtr(Grid.FatWrite, "write", grid_write).target),
+                @ptrCast(fat_write.target),
             );
             assert(compaction.bar != null);
             assert(compaction.beat != null);
@@ -1469,6 +1508,12 @@ pub fn CompactionType(
             _ = bar;
             const beat = &compaction.beat.?;
 
+            const duration = beat.write.?.timer.read();
+            std.log.info("Write complete for {} - timer at {}", .{ fat_write.hack, std.fmt.fmtDuration(duration) });
+
+            // if (fat_write.hack == 0) {
+            //     std.time.sleep(1000000000);
+            // }
             assert(beat.write != null);
             const write = &beat.write.?;
             write.pending_writes -= 1;
@@ -1483,12 +1528,12 @@ pub fn CompactionType(
         }
 
         fn blip_write_next_tick(next_tick: *Grid.NextTick) void {
-            const write_context: *?Beat.Write = @ptrCast(
+            const write: *?Beat.Write = @ptrCast(
                 @fieldParentPtr(Beat.Write, "next_tick", next_tick),
             );
-            const beat = @fieldParentPtr(Beat, "write", write_context);
+            const beat = @fieldParentPtr(Beat, "write", write);
 
-            const duration = write_context.*.?.timer.read();
+            const duration = write.*.?.timer.read();
             log.info("blip_write({}): all writes done - took {}.", .{ beat.write_split, std.fmt.fmtDuration(duration) });
             beat.deactivate_and_assert_and_callback(.write, null, null);
         }
@@ -1658,8 +1703,8 @@ pub fn CompactionType(
             table_builder.value_count = values_out_index;
         }
 
-        fn merge_fn(table_builder: *Table.Builder, values_in: *ValuesIn, drop_tombstones: bool) void {
-            log.info("blip_merge: Merging via merge_fn()", .{});
+        fn merge_values(table_builder: *Table.Builder, values_in: *ValuesIn, drop_tombstones: bool) void {
+            log.info("blip_merge: Merging via merge_values()", .{});
             assert(values_in[0].remaining() > 0);
             assert(values_in[1].remaining() > 0);
             assert(table_builder.value_count < Table.layout.block_value_count_max);

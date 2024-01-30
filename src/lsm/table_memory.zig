@@ -97,6 +97,14 @@ pub fn TableMemoryType(comptime Table: type) type {
                 // assert(target_count > 0);
             }
 
+            pub fn peek(self: *Iterator) ?Table.Value {
+                const old_source_index = self.source_index;
+                const next_value = self.next();
+                self.source_index = old_source_index;
+
+                return next_value;
+            }
+
             pub fn count(self: *const Iterator) usize {
                 return self.table_memory.count();
             }
