@@ -71,34 +71,17 @@ const Command = struct {
     fn init(
         command: *Command,
         allocator: mem.Allocator,
-        options: union(enum) { disk: struct { path: [:0]const u8, must_create: bool }, memory },
+        path: [:0]const u8,
+        must_create: bool,
     ) !void {
-        const path = if (options == .disk) options.disk.path else ".";
-
         // TODO Resolve the parent directory properly in the presence of .. and symlinks.
         // TODO Handle physical volumes where there is no directory to fsync.
         const dirname = std.fs.path.dirname(path) orelse ".";
         command.dir_fd = try IO.open_dir(dirname);
         errdefer os.close(command.dir_fd);
 
-        switch (options) {
-            .disk => |disk| {
-                const basename = std.fs.path.basename(path);
-                command.fd = try IO.open_file(
-                    command.dir_fd,
-                    basename,
-                    data_file_size_min,
-                    if (disk.must_create) .create else .open,
-                );
-            },
-            .memory => {
-                log_main.warn(
-                    "in-memory storage is not durable - data will be lost when the replica exits",
-                    .{},
-                );
-                command.fd = try IO.open_memory_file();
-            },
-        }
+        const basename = std.fs.path.basename(path);
+        command.fd = try IO.open_file(command.dir_fd, basename, data_file_size_min, if (must_create) .create else .open);
         errdefer os.close(command.fd);
 
         command.io = try IO.init(128, 0);
@@ -106,32 +89,6 @@ const Command = struct {
 
         command.storage = try Storage.init(&command.io, command.fd);
         errdefer command.storage.deinit();
-
-        // Format our data file if we're running in-memory.
-        if (options == .memory) {
-            var superblock = try SuperBlock.init(
-                allocator,
-                .{
-                    .storage = &command.storage,
-                    .storage_size_limit = data_file_size_min,
-                },
-            );
-            defer superblock.deinit(allocator);
-
-            const format_options = .{
-                .cluster = 0,
-                .replica = 0,
-                .replica_count = 1,
-            };
-
-            try vsr.format(Storage, allocator, format_options, &command.storage, &superblock);
-
-            log_main.info("{}: formatted in-memory: cluster={} replica_count={}", .{
-                format_options.replica,
-                format_options.cluster,
-                format_options.replica_count,
-            });
-        }
 
         command.message_pool = try MessagePool.init(allocator, .replica);
         errdefer command.message_pool.deinit(allocator);
@@ -147,7 +104,7 @@ const Command = struct {
 
     pub fn format(allocator: mem.Allocator, options: SuperBlock.FormatOptions, path: [:0]const u8) !void {
         var command: Command = undefined;
-        try command.init(allocator, .{ .disk = .{ .path = path, .must_create = true } });
+        try command.init(allocator, path, true);
         defer command.deinit(allocator);
 
         var superblock = try SuperBlock.init(
@@ -180,11 +137,7 @@ const Command = struct {
         const allocator = traced_allocator.allocator();
 
         var command: Command = undefined;
-        if (args.in_memory) {
-            try command.init(allocator, .memory);
-        } else {
-            try command.init(allocator, .{ .disk = .{ .path = args.path, .must_create = false } });
-        }
+        try command.init(allocator, args.path, false);
         defer command.deinit(allocator);
 
         var aof: AOFType = undefined;

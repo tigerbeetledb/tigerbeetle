@@ -1016,12 +1016,7 @@ pub const IO = struct {
         return handle;
     }
 
-    /// Creates a virtual file backed by memory.
-    pub fn open_memory_file() !os.fd_t {
-        @panic("open_memory_file is currently unsupported on windows");
-    }
-
-    /// Opens or creates a data file:
+    /// Opens or creates a journal file:
     /// - For reading and writing.
     /// - For Direct I/O (required on windows).
     /// - Obtains an advisory exclusive lock to the file descriptor.

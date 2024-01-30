@@ -33,7 +33,6 @@ const CliArgs = union(enum) {
         cache_transfers_posted: flags.ByteSize =
             .{ .bytes = constants.cache_transfers_posted_size_default },
         cache_grid: flags.ByteSize = .{ .bytes = constants.grid_cache_size_default },
-        in_memory: bool = false,
 
         positional: struct {
             path: [:0]const u8,
@@ -144,7 +143,6 @@ pub const Command = union(enum) {
         cache_transfers_posted: u32,
         storage_size_limit: u64,
         cache_grid_blocks: u32,
-        in_memory: bool,
         path: [:0]const u8,
     };
 
@@ -260,9 +258,6 @@ pub fn parse_args(allocator: std.mem.Allocator) !Command {
                     .{ storage_size_limit, constants.sector_size },
                 );
             }
-            if (start.in_memory and !std.mem.eql(u8, start.positional.path, "in-memory")) {
-                flags.fatal("--in-memory: path must be set to `in-memory`", .{});
-            }
 
             return Command{
                 .start = .{
@@ -289,7 +284,6 @@ pub fn parse_args(allocator: std.mem.Allocator) !Command {
                         Grid.Cache,
                         start.cache_grid,
                     ),
-                    .in_memory = start.in_memory,
                     .path = start.positional.path,
                 },
             };

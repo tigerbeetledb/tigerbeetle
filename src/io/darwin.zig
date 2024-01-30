@@ -662,23 +662,7 @@ pub const IO = struct {
 
     pub const INVALID_FILE: os.fd_t = -1;
 
-    /// Creates a virtual file backed by memory.
-    pub fn open_memory_file() !os.fd_t {
-        const flags: u32 = os.O.RDWR | os.O.EXCL | os.O.CREAT;
-
-        // Unlike on Linux where the filename passed in to memfd_create doesn't matter, shm_open
-        // names are shared between all processes. Immediately unlink the filename after creating
-        // it, and we open it with O_EXCL and O_CREAT to ensure that if a previous process somehow
-        // didn't unlink it, we won't clobber anything. We could add a random suffix if it's a
-        // concern.
-        const fd: os.fd_t = @intCast(os.darwin.shm_open("tigerbeetle-memory-file", flags, 0o600));
-        const unlink_status = os.darwin.shm_unlink("tigerbeetle-memory-file");
-        assert(unlink_status == 0);
-
-        return fd;
-    }
-
-    /// Opens or creates a data file:
+    /// Opens or creates a journal file:
     /// - For reading and writing.
     /// - For Direct I/O (required on darwin).
     /// - Obtains an advisory exclusive lock to the file descriptor.

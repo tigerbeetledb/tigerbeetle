@@ -976,12 +976,7 @@ pub const IO = struct {
 
     pub const INVALID_FILE: os.fd_t = -1;
 
-    /// Creates a virtual file backed by memory.
-    pub fn open_memory_file() !os.fd_t {
-        return @intCast(linux.memfd_create("tigerbeetle-memory-file", 0));
-    }
-
-    /// Opens or creates a data file:
+    /// Opens or creates a journal file:
     /// - For reading and writing.
     /// - For Direct I/O (if possible in development mode, but required in production mode).
     /// - Obtains an advisory exclusive lock to the file descriptor.
