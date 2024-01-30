@@ -68,7 +68,7 @@ pub const CompactionInfo = struct {
     /// How many values, across all tables, need to be processed.
     compaction_tables_value_count: usize,
 
-    // Keys are integers in TigerBeetle, with a current maximum support size of u128. Store these
+    // Keys are integers in TigerBeetle, with a maximum size of u128. Store these
     // here, instead of Key, to keep this unspecalized.
     target_key_min: u128,
     target_key_max: u128,
@@ -76,7 +76,8 @@ pub const CompactionInfo = struct {
 
 // FIXME: Change input / output to source / target
 pub const CompactionBlocks = struct {
-    /// FIXME: Input index blocks shared... Not sure of consequences yet.
+    /// Index blocks are global, and shared between blips.
+    /// FIXME: This complicates things somewhat.
     source_index_blocks: []BlockPtr,
 
     /// For each split, for each input level, we have a buffer of blocks.
@@ -219,11 +220,6 @@ pub fn CompactionType(
         const TableInfoA = union(enum) {
             immutable: *Tree.TableMemory,
             disk: TableInfoReference,
-        };
-
-        const InputLevel = enum {
-            a,
-            b,
         };
 
         const ValueBlockIterator = struct {
@@ -435,7 +431,7 @@ pub fn CompactionType(
                 callback: BlipCallback,
                 ptr: *anyopaque,
 
-                // These are blip local state. The value of current_output_data_block is copied out
+                // These are blip local state. The value of current_output_value_block is copied out
                 // at the end of the merge, so that the upcoming blip_write knows what to write.
                 //
                 // Both current_block_a and current_block_b start from 0, and it's the
@@ -443,7 +439,7 @@ pub fn CompactionType(
                 // first block in a buffer is where we need to start reading from.
                 current_block_a: usize = 0,
                 current_block_b: usize = 0,
-                current_output_data_block: usize = 0,
+                current_output_value_block: usize = 0,
 
                 next_tick: Grid.NextTick = undefined,
                 timer: std.time.Timer,
@@ -460,7 +456,6 @@ pub fn CompactionType(
 
             grid_reservation: ?Grid.Reservation,
 
-            // Index blocks don't have the same data dependency on cpu that data blocks do.
             // FIXME: undefined!
             blocks: CompactionBlocks = undefined,
 
@@ -469,7 +464,7 @@ pub fn CompactionType(
 
             input_values_processed: u64 = 0,
 
-            // Not sure of a better way.
+            // TODO: Not sure of a better way.
             value_block_a_count: usize = 0,
             value_block_b_count: usize = 0,
             value_blocks_to_write: ?usize = null,
@@ -753,7 +748,7 @@ pub fn CompactionType(
         /// beats_max is the number of beats that this compaction will have available to do its work.
         /// A compaction may be done before beats_max, if eg tables are mostly empty.
         /// Output index blocks are special, and are allocated at a bar level unlike all the other blocks
-        /// which are done at a beat level. This is because while we can ensure we fill a data block, index
+        /// which are done at a beat level. This is because while we can ensure we fill a value block, index
         /// blocks are too infrequent (one per table) to divide compaction by.
         pub fn bar_setup_budget(compaction: *Compaction, beats_max: u64, output_index_blocks: [2][]BlockPtr) void {
             assert(beats_max <= constants.lsm_batch_multiple);
@@ -784,7 +779,7 @@ pub fn CompactionType(
 
             log.info("Set up budget: OI: [0][0]: {*}, [1][0]: {*}", .{ output_index_blocks[0][0], output_index_blocks[1][0] });
 
-            // FIXME: Ok, so this gets set once, but we do an extra data block. What we should do is recalculate this dynamically after each beat, to better spread
+            // FIXME: Ok, so this gets set once, but we do an extra value block. What we should do is recalculate this dynamically after each beat, to better spread
             // the work out....
             log.info("Total: {} per beat goal: {}", .{ bar.compaction_tables_value_count, bar.per_beat_input_goal });
         }
@@ -996,8 +991,8 @@ pub fn CompactionType(
 
             // Used to select the Grid.Read to use - so shared between table a and table b.
             var read_target: usize = 0;
-            var data_blocks_read_a: usize = 0;
-            var data_blocks_read_b: usize = 0;
+            var value_blocks_read_a: usize = 0;
+            var value_blocks_read_b: usize = 0;
 
             // Read data for table a - which we'll only have if we're coming from disk.
             if (bar.table_info_a == .disk) {
@@ -1005,26 +1000,26 @@ pub fn CompactionType(
                 const index_block = beat.blocks.source_index_blocks[0];
                 const index_schema = schema.TableIndex.from(index_block);
 
-                const data_blocks_used = index_schema.data_blocks_used(index_block);
-                assert(bar.current_table_a_value_block_index < data_blocks_used);
+                const value_blocks_used = index_schema.data_blocks_used(index_block);
+                assert(bar.current_table_a_value_block_index < value_blocks_used);
 
-                const data_block_addresses = index_schema.data_addresses_used(index_block);
-                const data_block_checksums = index_schema.data_checksums_used(index_block);
+                const value_block_addresses = index_schema.data_addresses_used(index_block);
+                const value_block_checksums = index_schema.data_checksums_used(index_block);
 
-                while (data_blocks_read_a < beat.blocks.source_value_blocks[beat.read_split][0].len and data_blocks_read_a < data_blocks_used) {
+                while (value_blocks_read_a < beat.blocks.source_value_blocks[beat.read_split][0].len and value_blocks_read_a < value_blocks_used) {
                     beat.grid_reads[read_target].target = compaction;
                     beat.grid_reads[read_target].hack = read_target;
                     compaction.grid.read_block(
                         .{ .from_local_or_global_storage = blip_read_data_callback },
                         &beat.grid_reads[read_target].read,
-                        data_block_addresses[data_blocks_read_a],
-                        data_block_checksums[data_blocks_read_a].value,
+                        value_block_addresses[value_blocks_read_a],
+                        value_block_checksums[value_blocks_read_a].value,
                         .{ .cache_read = true, .cache_write = true },
                     );
 
                     read.pending_reads_data += 1;
                     read_target += 1;
-                    data_blocks_read_a += 1;
+                    value_blocks_read_a += 1;
                 }
             }
 
@@ -1041,38 +1036,38 @@ pub fn CompactionType(
                 assert(previous_schema == null or stdx.equal_bytes(schema.TableIndex, &previous_schema.?, &index_schema));
                 previous_schema = index_schema;
 
-                const data_blocks_used = index_schema.data_blocks_used(index_block);
-                assert(bar.current_table_b_value_block_index < data_blocks_used);
+                const value_blocks_used = index_schema.data_blocks_used(index_block);
+                assert(bar.current_table_b_value_block_index < value_blocks_used);
 
-                const data_block_addresses = index_schema.data_addresses_used(index_block);
-                const data_block_checksums = index_schema.data_checksums_used(index_block);
+                const value_block_addresses = index_schema.data_addresses_used(index_block);
+                const value_block_checksums = index_schema.data_checksums_used(index_block);
 
-                std.log.info(".... this bar.current_table_b_index_block_index({}) has {} used value blocks", .{ bar.current_table_b_index_block_index, data_blocks_used });
+                std.log.info(".... this bar.current_table_b_index_block_index({}) has {} used value blocks", .{ bar.current_table_b_index_block_index, value_blocks_used });
                 // Try read in as many value blocks as this index block has...
-                while (data_blocks_read_b < data_blocks_used) {
+                while (value_blocks_read_b < value_blocks_used) {
                     beat.grid_reads[read_target].target = compaction;
                     beat.grid_reads[read_target].hack = read_target;
                     compaction.grid.read_block(
                         .{ .from_local_or_global_storage = blip_read_data_callback },
                         &beat.grid_reads[read_target].read,
-                        data_block_addresses[data_blocks_read_b],
-                        data_block_checksums[data_blocks_read_b].value,
+                        value_block_addresses[value_blocks_read_b],
+                        value_block_checksums[value_blocks_read_b].value,
                         .{ .cache_read = true, .cache_write = true },
                     );
 
                     read.pending_reads_data += 1;
                     read_target += 1;
-                    data_blocks_read_b += 1;
+                    value_blocks_read_b += 1;
 
                     // But, once our read buffer is full, break out of the outer loop.
-                    if (data_blocks_read_b == beat.blocks.source_value_blocks[beat.read_split][1].len) {
+                    if (value_blocks_read_b == beat.blocks.source_value_blocks[beat.read_split][1].len) {
                         break :outer;
                     }
                 }
             }
 
-            beat.value_block_a_count = data_blocks_read_a;
-            beat.value_block_b_count = data_blocks_read_b;
+            beat.value_block_a_count = value_blocks_read_a;
+            beat.value_block_b_count = value_blocks_read_b;
 
             log.info("blip_read({}): Scheduled {} data reads to a buffer {} big.", .{ beat.read_split, read.pending_reads_data, beat.blocks.source_value_blocks[beat.read_split][1].len });
 
@@ -1106,7 +1101,7 @@ pub fn CompactionType(
             const table_a_or_b = 1;
             const read_index = parent.hack;
 
-            log.info("blip_read({}): copying data block to [{}][{}][{}]", .{ beat.read_split, beat.read_split, table_a_or_b, read_index });
+            log.info("blip_read({}): copying value block to [{}][{}][{}]", .{ beat.read_split, beat.read_split, table_a_or_b, read_index });
             stdx.copy_disjoint(.exact, u8, beat.blocks.source_value_blocks[beat.read_split][table_a_or_b][read_index], value_block);
 
             // Join on all outstanding reads before continuing.
@@ -1142,7 +1137,7 @@ pub fn CompactionType(
 
             const values_b = if (beat.value_block_b_count > 0) Table.data_block_values_used(blocks_b[merge.current_block_b]) else &.{};
 
-            // // Assert that we're reading data blocks in key order.
+            // // Assert that we're reading value blocks in key order.
             // const values_in = compaction.values_in[index];
             // assert(values_in.len > 0);
             // if (constants.verify) {
@@ -1256,16 +1251,16 @@ pub fn CompactionType(
                         bar.table_builder.set_index_block(index_block);
                     }
 
-                    // Set the data block if needed.
+                    // Set the value block if needed.
                     if (bar.table_builder.state == .index_block) {
-                        const data_block = beat.blocks.target_value_blocks[beat.merge_split][merge.current_output_data_block];
-                        log.info("blip_merge({}): Setting data block to [{}][{}].", .{
+                        const value_block = beat.blocks.target_value_blocks[beat.merge_split][merge.current_output_value_block];
+                        log.info("blip_merge({}): Setting value block to [{}][{}].", .{
                             beat.merge_split,
                             beat.merge_split,
-                            merge.current_output_data_block,
+                            merge.current_output_value_block,
                         });
-                        @memset(data_block, 0); // FIXME: We don't need to zero the whole block; just the part of the padding that's not covered by alignment.
-                        bar.table_builder.set_data_block(data_block);
+                        @memset(value_block, 0); // FIXME: We don't need to zero the whole block; just the part of the padding that's not covered by alignment.
+                        bar.table_builder.set_data_block(value_block);
                     }
 
                     if (values_in_a_len == 0) {
@@ -1302,10 +1297,10 @@ pub fn CompactionType(
                     // 1. Have we finished our input entirely? If so, we flush what we have - it's
                     //    likely to be a partial block but that's OK.
                     // 2. Have we reached our per_beat_input_goal? If so, we'll flush at the next
-                    //    complete data block.
+                    //    complete value block.
                     //
                     // This means that we'll potentially overrun our per_beat_input_goal by up to
-                    // a full data block.
+                    // a full value block.
                     input_exhausted_bar = values_in_a_len + values_in_b_len == 0;
                     input_exhausted_beat = beat.input_values_processed >= bar.per_beat_input_goal;
 
@@ -1318,9 +1313,9 @@ pub fn CompactionType(
                     });
 
                     switch (compaction.check_and_finish_blocks(input_exhausted_bar)) {
-                        .unfinished_data_block => continue,
+                        .unfinished_value_block => continue,
 
-                        .finished_data_block => {
+                        .finished_value_block => {
                             if (input_exhausted_beat) {
                                 break :outer;
                             }
@@ -1336,7 +1331,7 @@ pub fn CompactionType(
 
             // FIXME: SUPER NB! We need to tell our write stage how many blocks to write! This is beat context since it crosses stages!
             assert(beat.value_blocks_to_write == null);
-            beat.value_blocks_to_write = merge.current_output_data_block;
+            beat.value_blocks_to_write = merge.current_output_value_block;
 
             // FIXME: Check at least one output value.
             // assert(filled <= target.len);
@@ -1349,8 +1344,8 @@ pub fn CompactionType(
         }
 
         fn check_and_finish_blocks(compaction: *Compaction, force_flush: bool) enum {
-            unfinished_data_block,
-            finished_data_block,
+            unfinished_value_block,
+            finished_value_block,
             need_write,
         } {
             assert(compaction.bar != null);
@@ -1365,9 +1360,9 @@ pub fn CompactionType(
             const table_builder = &bar.table_builder;
 
             var output_blocks_full = false;
-            var finished_data_block = false;
+            var finished_value_block = false;
 
-            // Flush the data block if needed.
+            // Flush the value block if needed.
             if (table_builder.data_block_full() or
                 table_builder.index_block_full() or
                 (force_flush and !table_builder.data_block_empty()))
@@ -1378,15 +1373,15 @@ pub fn CompactionType(
                     .snapshot_min = snapshot_min_for_table_output(bar.op_min),
                     .tree_id = compaction.tree_config.id,
                 });
-                log.info("blip_merge({}): Finished data block to [{}][{}]", .{
+                log.info("blip_merge({}): Finished value block to [{}][{}]", .{
                     beat.merge_split,
                     beat.merge_split,
-                    merge.current_output_data_block,
+                    merge.current_output_value_block,
                 });
 
-                merge.current_output_data_block += 1;
-                finished_data_block = true;
-                if (merge.current_output_data_block == beat.blocks.target_value_blocks[beat.merge_split].len or force_flush) {
+                merge.current_output_value_block += 1;
+                finished_value_block = true;
+                if (merge.current_output_value_block == beat.blocks.target_value_blocks[beat.merge_split].len or force_flush) {
                     output_blocks_full = true;
                 }
             }
@@ -1421,8 +1416,8 @@ pub fn CompactionType(
             }
 
             if (output_blocks_full) return .need_write;
-            if (finished_data_block) return .finished_data_block;
-            return .unfinished_data_block;
+            if (finished_value_block) return .finished_value_block;
+            return .unfinished_value_block;
         }
 
         /// Perform write IO to write our output_index_blocks and target_value_blocks to disk.
@@ -1465,7 +1460,7 @@ pub fn CompactionType(
                 bar.output_index_block = 0;
             }
 
-            // Write any complete data blocks.
+            // Write any complete value blocks.
             for (beat.blocks.target_value_blocks[beat.write_split][0..beat.value_blocks_to_write.?], 0..) |*block, i| {
                 log.info("blip_write({}): Issuing a data write for [{}][{}]", .{ beat.write_split, beat.write_split, i });
 
@@ -1487,7 +1482,7 @@ pub fn CompactionType(
             // FIXME: Pace our compaction by input *values* not input blocks. Blocks might be empty, values will be a far better metric.
             // FIXME: Whenever we run and pace compaction, in the one worst case we'll have 9 input tables forming 7 output tables, and the
             // other will be 9 input tables forming 9 output tables. We should assert that we always do this.
-            // The other note is that we don't want to hang on to data blocks across beat boundaries, so we'll always end when one is full
+            // The other note is that we don't want to hang on to value blocks across beat boundaries, so we'll always end when one is full
             // and not try to be too perfect.
             // FIXME: The big idea is to make compaction pacing explicit and asserted behaviour rather than just an implicit property of the code
 
@@ -1498,22 +1493,15 @@ pub fn CompactionType(
 
         fn blip_write_callback(grid_write: *Grid.Write) void {
             const fat_write = @fieldParentPtr(Grid.FatWrite, "write", grid_write);
-            const compaction: *Compaction = @alignCast(
-                @ptrCast(fat_write.target),
-            );
+            const compaction: *Compaction = @alignCast(@ptrCast(fat_write.target));
             assert(compaction.bar != null);
             assert(compaction.beat != null);
 
-            const bar = &compaction.bar.?;
-            _ = bar;
             const beat = &compaction.beat.?;
 
-            const duration = beat.write.?.timer.read();
-            std.log.info("Write complete for {} - timer at {}", .{ fat_write.hack, std.fmt.fmtDuration(duration) });
+            // const duration = beat.write.?.timer.read();
+            // std.log.info("Write complete for {} - timer at {}", .{ fat_write.hack, std.fmt.fmtDuration(duration) });
 
-            // if (fat_write.hack == 0) {
-            //     std.time.sleep(1000000000);
-            // }
             assert(beat.write != null);
             const write = &beat.write.?;
             write.pending_writes -= 1;
@@ -1642,6 +1630,7 @@ pub fn CompactionType(
         /// If we can just move the table, don't bother with merging.
         fn move_table(compaction: *Compaction) void {
             const bar = &compaction.bar.?;
+            assert(bar.move_table);
 
             log.info(
                 "{s}: Moving table: level_b={}",
@@ -1672,8 +1661,14 @@ pub fn CompactionType(
             grid.release(Table.block_address(index_block));
         }
 
-        ////////////// The actual CPU merging methods below. //////////////
-        // TODO: Add benchmarks for all of these specifically.
+        // TODO: Add benchmarks for these CPU merge methods. merge_values() is the most general,
+        // and could handle both what copy_drop_tombstones() and Iterator.copy() do, but we expect
+        // copy() -> copy_drop_tombstones() -> merge_values() in terms of performance.
+
+        // Looking for fn copy()? It exists as a method on either TableMemory.Iterator or
+        // ValueBlockIterator. Potentially, the value block case could be more optimal than
+        // looping through an iterator (just a straight memcpy) but this should be benchmarked!
+
         /// Copy values from table_a to table_b, dropping tombstones as we go.
         fn copy_drop_tombstones(table_builder: *Table.Builder, values_in: *ValuesIn) void {
             log.info("blip_merge: Merging via copy_drop_tombstones()", .{});
@@ -1681,6 +1676,7 @@ pub fn CompactionType(
             assert(table_builder.value_count < Table.layout.block_value_count_max);
 
             // Copy variables locally to ensure a tight loop.
+            // TODO: Actually benchmark this.
             var values_in_a = values_in[0];
             const values_out = table_builder.data_block_values();
             var values_out_index = table_builder.value_count;
@@ -1688,7 +1684,8 @@ pub fn CompactionType(
             // Merge as many values as possible.
             while (values_in_a.next()) |value_a| {
                 if (tombstone(&value_a)) {
-                    // TODO: What's the impact of this check?
+                    // TODO: What's the impact of this check? We could invert it since Table.usage
+                    // is comptime known.
                     assert(Table.usage != .secondary_index);
                     continue;
                 }
@@ -1703,6 +1700,8 @@ pub fn CompactionType(
             table_builder.value_count = values_out_index;
         }
 
+        /// Merge values from table_a and table_b, with table_a taking precedence. Tombstones may
+        /// or may not be dropped depending on drop_tombstones.
         fn merge_values(table_builder: *Table.Builder, values_in: *ValuesIn, drop_tombstones: bool) void {
             log.info("blip_merge: Merging via merge_values()", .{});
             assert(values_in[0].remaining() > 0);
@@ -1710,6 +1709,7 @@ pub fn CompactionType(
             assert(table_builder.value_count < Table.layout.block_value_count_max);
 
             // Copy variables locally to ensure a tight loop.
+            // TODO: Actually benchmark this.
             var values_in_a = values_in[0];
             var values_in_b = values_in[1];
             const values_out = table_builder.data_block_values();

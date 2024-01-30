@@ -343,7 +343,6 @@ pub const Storage = struct {
         assert(write.offset % constants.sector_size == 0);
         self.assert_bounds(write.buffer, write.offset);
 
-        std.log.info("Starting write...", .{});
         self.io.write(
             *Storage,
             self,
@@ -387,12 +386,10 @@ pub const Storage = struct {
         write.buffer = write.buffer[bytes_written..];
 
         if (write.buffer.len == 0) {
-            std.log.info("write done calling callback...", .{});
             write.callback(write);
             return;
         }
 
-        std.log.info("write looping...", .{});
         self.start_write(write);
     }
 
