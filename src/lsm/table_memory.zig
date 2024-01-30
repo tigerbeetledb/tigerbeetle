@@ -18,6 +18,7 @@ pub fn TableMemoryType(comptime Table: type) type {
         pub const Iterator = struct {
             table_memory: *TableMemory,
             source_index: usize,
+            active_block_index: usize = 0,
 
             pub fn init(table_memory: *TableMemory, source_index: usize) Iterator {
                 const source = table_memory.values_used();

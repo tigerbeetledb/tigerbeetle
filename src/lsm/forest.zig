@@ -285,21 +285,26 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
 
                 const source_index_blocks = blocks[0..9];
 
-                const source_value_pipeline_0_level_a = blocks[9..][0..1];
-                const source_value_pipeline_0_level_b = blocks[10..][0..1];
-                const source_value_pipeline_1_level_a = blocks[20..][0..25];
-                const source_value_pipeline_1_level_b = blocks[50..][0..25];
+                const source_value_pipeline_0_level_a = blocks[10..][0..10];
+                const source_value_pipeline_0_level_b = blocks[20..][0..10];
+                const source_value_pipeline_1_level_a = blocks[30..][0..10];
+                const source_value_pipeline_1_level_b = blocks[40..][0..10];
 
                 const output_value_pipeline_0 = blocks[100..][0..300];
                 const output_value_pipeline_1 = blocks[500..][0..300];
 
                 const source_value_blocks = .{ .{ source_value_pipeline_0_level_a, source_value_pipeline_0_level_b }, .{ source_value_pipeline_1_level_a, source_value_pipeline_1_level_b } };
                 const target_value_blocks = .{ output_value_pipeline_0, output_value_pipeline_1 };
+                const source_value_blocks_max = .{ .{ source_value_pipeline_0_level_a.len, source_value_pipeline_0_level_b.len }, .{ source_value_pipeline_1_level_a.len, source_value_pipeline_1_level_b.len } };
+                const target_value_blocks_max = .{ output_value_pipeline_0.len, output_value_pipeline_1.len };
 
                 return .{
                     .source_index_blocks = source_index_blocks,
                     .source_value_blocks = source_value_blocks,
                     .target_value_blocks = target_value_blocks,
+
+                    .source_value_blocks_max = source_value_blocks_max,
+                    .target_value_blocks_max = target_value_blocks_max,
                 };
             }
 
@@ -441,6 +446,10 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                 };
                 log.info("advance_pipeline: Active compaction is: {}", .{active_compaction_index});
 
+                if (self.slots[0]) |*first_slot| {
+                    first_slot.interface.fixup_buffers();
+                }
+
                 // Advanced the current stages, making sure to start our reads and writes before CPU
                 var cpu: ?usize = null;
                 for (self.slots[0..self.slot_filled_count], 0..) |*slot_wrapped, i| {
@@ -450,10 +459,13 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                         .read => {
                             assert(cpu == null);
 
-                            if (!self.beat_exhausted) {
-                                // If we hit beat_exhausted, it means that we need to discard the results of this read. We don't
-                                // have to do anything explicit to discard, we just need to increment our compaction state. Thus,
-                                // only start CPU work after read if we're not exhausted.
+                            if (self.beat_exhausted) {
+                                // If we hit beat_exhausted, it means that we need to discard the
+                                // results of this read by rolling back the internal state.
+                                log.info("!!!!!!!!!! doing undo_blip_read()", .{});
+                                slot.interface.undo_blip_read();
+                            } else {
+                                // Only start CPU work after read if we're not exhausted.
                                 cpu = i;
                             }
                         },
@@ -506,11 +518,14 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                         .compaction_index = active_compaction_index,
                     };
 
-                    self.slots[slot_idx].?.interface.beat_blocks_assign(
-                        self.compaction_blocks_split,
-                        self.compaction_reads,
-                        self.compaction_writes,
-                    );
+                    // FIXME: Assert beat_blocks_assign is only called once in compaction?
+                    if (slot_idx == 0) {
+                        self.slots[slot_idx].?.interface.beat_blocks_assign(
+                            self.compaction_blocks_split,
+                            self.compaction_reads,
+                            self.compaction_writes,
+                        );
+                    }
 
                     // We always start with a read.
                     log.info("Slot {}, Compaction {}: Calling blip_read", .{ slot_idx, self.slots[slot_idx].?.compaction_index });
@@ -741,15 +756,21 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                 inline for (0..constants.lsm_levels) |level_b| {
                     inline for (tree_id_range.min..tree_id_range.max) |tree_id| {
                         var tree = tree_for_id(forest, tree_id);
-                        assert(tree.compactions.len == constants.lsm_levels);
 
-                        var compaction = &tree.compactions[level_b];
+                        // FIXME: Big hack to limit to a single tree for debugging!
+                        if (tree_id != 2) {
+                            tree.table_immutable.mutability.immutable.flushed = true;
+                        } else {
+                            assert(tree.compactions.len == constants.lsm_levels);
 
-                        // This will return how many compactions and stuff this level needs to do...
-                        if (compaction.bar_setup(tree, op)) |info| {
-                            // FIXME: Assert len?
-                            forest.compaction_pipeline.compactions.append_assume_capacity(CompactionInterface.init(info, compaction));
-                            log.info("Target Level: {}, Tree: {s}@{}: {}", .{ level_b, tree.config.name, op, info });
+                            var compaction = &tree.compactions[level_b];
+
+                            // This will return how many compactions and stuff this level needs to do...
+                            if (compaction.bar_setup(tree, op)) |info| {
+                                // FIXME: Assert len?
+                                forest.compaction_pipeline.compactions.append_assume_capacity(CompactionInterface.init(info, compaction));
+                                log.info("Target Level: {}, Tree: {s}@{}: {}", .{ level_b, tree.config.name, op, info });
+                            }
                         }
                     }
                 }
