@@ -31,6 +31,7 @@ const SuperBlock = vsr.SuperBlockType(Storage);
 const ScanBuffer = @import("scan_buffer.zig").ScanBuffer;
 const ScanTreeType = @import("scan_tree.zig").ScanTreeType;
 const FreeSetEncoded = vsr.FreeSetEncodedType(Storage);
+const Snapshot = @import("schema.zig").Snapshot;
 
 const Value = packed struct(u128) {
     id: u64,
@@ -79,7 +80,6 @@ const FuzzOp = union(enum) {
 const batch_size_max = constants.message_size_max - @sizeOf(vsr.Header);
 const commit_entries_max = @divFloor(batch_size_max, @sizeOf(Value));
 const value_count_max = constants.lsm_batch_multiple * commit_entries_max;
-const snapshot_latest = @import("tree.zig").snapshot_latest;
 const table_count_max = @import("tree.zig").table_count_max;
 
 const cluster = 32;
@@ -347,7 +347,7 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
                 env.tree.lookup_from_levels_storage(.{
                     .callback = get_callback,
                     .context = &env.lookup_context,
-                    .snapshot = snapshot_latest,
+                    .snapshot = Snapshot.latest,
                     .key = key,
                     .level_min = 0,
                 });
@@ -371,7 +371,7 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
             env.scan_tree = ScanTree.init(
                 &env.tree,
                 &env.scan_buffer,
-                snapshot_latest,
+                Snapshot.latest,
                 key_min,
                 key_max,
                 direction,

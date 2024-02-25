@@ -6,6 +6,7 @@ const mem = std.mem;
 
 const stdx = @import("../stdx.zig");
 const constants = @import("../constants.zig");
+const schema = @import("schema.zig");
 
 const TableType = @import("table.zig").TableType;
 const TreeType = @import("tree.zig").TreeType;
@@ -16,8 +17,7 @@ const CacheMapType = @import("cache_map.zig").CacheMapType;
 const ScopeCloseMode = @import("tree.zig").ScopeCloseMode;
 const ManifestLogType = @import("manifest_log.zig").ManifestLogType;
 const ScanBuilderType = @import("scan_builder.zig").ScanBuilderType;
-
-const snapshot_latest = @import("tree.zig").snapshot_latest;
+const Snapshot = schema.Snapshot;
 
 fn ObjectTreeHelpers(comptime Object: type) type {
     assert(@hasField(Object, "timestamp"));
@@ -450,7 +450,7 @@ pub fn GrooveType(
         prefetch_keys: PrefetchKeys,
 
         /// The snapshot to prefetch from.
-        prefetch_snapshot: ?u64,
+        prefetch_snapshot: ?Snapshot,
 
         /// This is used to accelerate point lookups and is not used for range queries.
         /// It's also where prefetched data is loaded into, so we don't have a different
@@ -626,13 +626,13 @@ pub fn GrooveType(
 
         /// Must be called directly before the state machine begins queuing ids for prefetch.
         /// When `snapshot` is null, prefetch from the current snapshot.
-        pub fn prefetch_setup(groove: *Groove, snapshot: ?u64) void {
+        pub fn prefetch_setup(groove: *Groove, snapshot: ?Snapshot) void {
             // We currently don't have anything that uses or tests snapshots. Leave this
             // here as a warning that they're not fully tested yet.
             assert(snapshot == null);
 
-            const snapshot_target = snapshot orelse snapshot_latest;
-            assert(snapshot_target <= snapshot_latest);
+            const snapshot_target = snapshot orelse Snapshot.latest;
+            assert(snapshot_target.timestamp <= Snapshot.latest.timestamp);
 
             groove.prefetch_snapshot = snapshot_target;
             assert(groove.prefetch_keys.count() == 0);
@@ -721,7 +721,7 @@ pub fn GrooveType(
         pub const PrefetchContext = struct {
             groove: *Groove,
             callback: *const fn (*PrefetchContext) void,
-            snapshot: u64,
+            snapshot: Snapshot,
 
             key_iterator: PrefetchKeys.Iterator,
             /// The goal is to fully utilize the disk I/O to ensure the prefetch completes as

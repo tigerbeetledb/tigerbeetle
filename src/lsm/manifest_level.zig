@@ -9,6 +9,8 @@ const stdx = @import("../stdx.zig");
 const constants = @import("../constants.zig");
 const lsm = @import("tree.zig");
 const binary_search = @import("binary_search.zig");
+const schema = @import("schema.zig");
+const Snapshot = schema.Snapshot;
 
 const Direction = @import("../direction.zig").Direction;
 const SegmentedArray = @import("segmented_array.zig").SegmentedArray;
@@ -63,7 +65,7 @@ pub fn ManifestLevelType(
             // The tables are ordered by (key_max,snapshot_min),
             // fields are declared from the least siginificant to the most significant:
 
-            snapshot_min: u64,
+            snapshot_min: Snapshot,
             key_max: Key,
 
             pub inline fn key_from_value(value: KeyMaxSnapshotMin) Int {
@@ -109,7 +111,7 @@ pub fn ManifestLevelType(
                     return;
                 }
 
-                const snapshots = &[1]u64{lsm.snapshot_latest};
+                const snapshots = &[1]Snapshot{Snapshot.latest};
                 if (exclude_range.key_max == self.key_range.?.key_max) {
                     var itr = level.iterator(.visible, snapshots, .descending, null);
                     const table: ?*const TableInfo = itr.next();
@@ -214,7 +216,7 @@ pub fn ManifestLevelType(
             const absolute_index_tables = level.tables.insert_element(node_pool, table.*);
             assert(absolute_index_tables < level.tables.len());
 
-            if (table.visible(lsm.snapshot_latest)) level.table_count_visible += 1;
+            if (table.visible(Snapshot.latest)) level.table_count_visible += 1;
             level.generation +%= 1;
 
             level.key_range_latest.include(KeyRange{
@@ -244,15 +246,15 @@ pub fn ManifestLevelType(
         /// * The table is mutable so that this function can update its snapshot.
         /// * Asserts that the table currently has snapshot_max of math.maxInt(u64).
         /// * Asserts that the table exists in the manifest.
-        pub fn set_snapshot_max(level: *Self, snapshot: u64, table_ref: TableInfoReference) void {
+        pub fn set_snapshot_max(level: *Self, snapshot: Snapshot, table_ref: TableInfoReference) void {
             var table = table_ref.table_info;
 
             assert(table_ref.generation == level.generation);
             if (constants.verify) {
                 assert(level.contains(table));
             }
-            assert(snapshot < lsm.snapshot_latest);
-            assert(table.snapshot_max == math.maxInt(u64));
+            assert(snapshot.timestamp < Snapshot.latest.timestamp);
+            assert(table.snapshot_max.timestamp == math.maxInt(u64));
             assert(table.key_min <= table.key_max);
 
             table.snapshot_max = snapshot;
@@ -291,7 +293,7 @@ pub fn ManifestLevelType(
             level.tables.remove_elements(node_pool, table_index_absolute, 1);
             assert(level.keys.len() == level.tables.len());
 
-            if (table.visible(lsm.snapshot_latest)) {
+            if (table.visible(Snapshot.latest)) {
                 level.table_count_visible -= 1;
 
                 level.key_range_latest.exclude(.{
@@ -306,8 +308,8 @@ pub fn ManifestLevelType(
         ///
         /// Our key range keeps track of tables that are visible to snapshot_latest, so it cannot
         /// be relied upon for queries to older snapshots.
-        pub fn key_range_contains(level: *const Self, snapshot: u64, key: Key) bool {
-            if (snapshot == lsm.snapshot_latest) {
+        pub fn key_range_contains(level: *const Self, snapshot: Snapshot, key: Key) bool {
+            if (snapshot.timestamp == Snapshot.latest.timestamp) {
                 return level.key_range_latest.contains(key);
             } else {
                 return true;
@@ -327,12 +329,12 @@ pub fn ManifestLevelType(
         pub fn iterator(
             level: *const Self,
             visibility: Visibility,
-            snapshots: []const u64,
+            snapshots: []const Snapshot,
             direction: Direction,
             key_range: ?KeyRange,
         ) Iterator {
             for (snapshots) |snapshot| {
-                assert(snapshot <= lsm.snapshot_latest);
+                assert(snapshot.timestamp <= Snapshot.latest.timestamp);
             }
 
             const inner = blk: {
@@ -379,7 +381,7 @@ pub fn ManifestLevelType(
             level: *const Self,
             inner: Tables.Iterator,
             visibility: Visibility,
-            snapshots: []const u64,
+            snapshots: []const Snapshot,
             direction: Direction,
             key_range: ?KeyRange,
 
@@ -550,13 +552,13 @@ pub fn ManifestLevelType(
         pub fn table_with_least_overlap(
             level_a: *const Self,
             level_b: *const Self,
-            snapshot: u64,
+            snapshot: Snapshot,
             max_overlapping_tables: usize,
         ) ?LeastOverlapTable {
             assert(max_overlapping_tables <= constants.lsm_growth_factor);
 
             var optimal: ?LeastOverlapTable = null;
-            const snapshots = [1]u64{snapshot};
+            const snapshots = [1]Snapshot{snapshot};
             var iterations: usize = 0;
             var it = level_a.iterator(
                 .visible,
@@ -597,7 +599,7 @@ pub fn ManifestLevelType(
         ///
         /// * The table returned is visible to `snapshot`.
         pub fn next_table(self: *const Self, parameters: struct {
-            snapshot: u64,
+            snapshot: Snapshot,
             key_min: Key,
             key_max: Key,
             key_exclusive: ?Key,
@@ -608,7 +610,7 @@ pub fn ManifestLevelType(
             const key_exclusive = parameters.key_exclusive;
             const direction = parameters.direction;
             const snapshot = parameters.snapshot;
-            const snapshots = [_]u64{snapshot};
+            const snapshots = [_]Snapshot{snapshot};
 
             assert(key_min <= key_max);
 
@@ -678,7 +680,7 @@ pub fn ManifestLevelType(
             level: *const Self,
             key_min: Key,
             key_max: Key,
-            snapshot: u64,
+            snapshot: Snapshot,
             max_overlapping_tables: usize,
         ) ?OverlapRange {
             assert(max_overlapping_tables <= constants.lsm_growth_factor);
@@ -688,7 +690,7 @@ pub fn ManifestLevelType(
                 .key_max = key_max,
                 .tables = .{},
             };
-            const snapshots = [1]u64{snapshot};
+            const snapshots = [1]Snapshot{snapshot};
             var it = level.iterator(
                 .visible,
                 &snapshots,
@@ -697,7 +699,7 @@ pub fn ManifestLevelType(
             );
 
             while (it.next()) |table| {
-                assert(table.visible(lsm.snapshot_latest));
+                assert(table.visible(Snapshot.latest));
                 assert(table.key_min <= table.key_max);
                 assert(range.key_min <= table.key_max);
                 assert(table.key_min <= range.key_max);
@@ -790,8 +792,8 @@ pub fn TestContext(
         pool: TestPool,
         level: TestLevel,
 
-        snapshot_max: u64 = 1,
-        snapshots: stdx.BoundedArray(u64, 8) = .{},
+        snapshot_max: Snapshot = .{ .timestamp = 1 },
+        snapshots: stdx.BoundedArray(Snapshot, 8) = .{},
         snapshot_tables: stdx.BoundedArray(std.ArrayList(TableInfo), 8) = .{},
 
         /// Contains only tables with snapshot_max == lsm.snapshot_latest
@@ -948,14 +950,14 @@ pub fn TestContext(
         }
 
         /// See Manifest.take_snapshot()
-        fn take_snapshot(context: *Self) u64 {
+        fn take_snapshot(context: *Self) Snapshot {
             // A snapshot cannot be 0 as this is a reserved value in the superblock.
-            assert(context.snapshot_max > 0);
+            assert(context.snapshot_max.timestamp > 0);
             // The constant snapshot_latest must compare greater than any issued snapshot.
             // This also ensures that we are not about to overflow the u64 counter.
-            assert(context.snapshot_max < lsm.snapshot_latest - 1);
+            assert(context.snapshot_max.timestamp < Snapshot.latest.timestamp - 1);
 
-            context.snapshot_max += 1;
+            context.snapshot_max.timestamp += 1;
 
             return context.snapshot_max;
         }
@@ -1106,23 +1108,23 @@ pub fn TestContext(
         }
 
         fn verify(context: *Self) !void {
-            try context.verify_snapshot(lsm.snapshot_latest, context.reference.items);
+            try context.verify_snapshot(Snapshot.latest, context.reference.items);
 
             for (context.snapshots.slice(), 0..) |snapshot, i| {
                 try context.verify_snapshot(snapshot, context.snapshot_tables.get(i).items);
             }
         }
 
-        fn verify_snapshot(context: *Self, snapshot: u64, reference: []const TableInfo) !void {
+        fn verify_snapshot(context: *Self, snapshot: Snapshot, reference: []const TableInfo) !void {
             if (log) {
-                std.debug.print("\nsnapshot: {}\n", .{snapshot});
+                std.debug.print("\nsnapshot: {}\n", .{snapshot.timestamp});
                 std.debug.print("expect: ", .{});
                 for (reference) |t| std.debug.print("[{},{}], ", .{ t.key_min, t.key_max });
 
                 std.debug.print("\nactual: ", .{});
                 var it = context.level.iterator(
                     .visible,
-                    @as(*const [1]u64, &snapshot),
+                    @as(*const [1]Snapshot, &snapshot),
                     .ascending,
                     KeyRange{ .key_min = 0, .key_max = math.maxInt(Key) },
                 );
@@ -1133,7 +1135,7 @@ pub fn TestContext(
             {
                 var it = context.level.iterator(
                     .visible,
-                    @as(*const [1]u64, &snapshot),
+                    @as(*const [1]Snapshot, &snapshot),
                     .ascending,
                     KeyRange{ .key_min = 0, .key_max = math.maxInt(Key) },
                 );
@@ -1148,7 +1150,7 @@ pub fn TestContext(
             {
                 var it = context.level.iterator(
                     .visible,
-                    @as(*const [1]u64, &snapshot),
+                    @as(*const [1]Snapshot, &snapshot),
                     .descending,
                     KeyRange{ .key_min = 0, .key_max = math.maxInt(Key) },
                 );
@@ -1175,7 +1177,7 @@ pub fn TestContext(
                 {
                     var it = context.level.iterator(
                         .visible,
-                        @as(*const [1]u64, &snapshot),
+                        @as(*const [1]Snapshot, &snapshot),
                         .ascending,
                         KeyRange{ .key_min = key_min, .key_max = key_max },
                     );
@@ -1190,7 +1192,7 @@ pub fn TestContext(
                 {
                     var it = context.level.iterator(
                         .visible,
-                        @as(*const [1]u64, &snapshot),
+                        @as(*const [1]Snapshot, &snapshot),
                         .descending,
                         KeyRange{ .key_min = key_min, .key_max = key_max },
                     );

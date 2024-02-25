@@ -35,6 +35,27 @@ const checksum_size = @sizeOf(u256);
 const block_size = constants.block_size;
 const block_body_size = block_size - @sizeOf(vsr.Header);
 
+pub const Snapshot = packed struct(u64) {
+    pub const max: Snapshot = .{ .timestamp = std.math.maxInt(u64) };
+
+    /// We reserve maxInt(u64) to indicate that a table has not been deleted.
+    /// Tables that have not been deleted have snapshot_max of maxInt(u64).
+    /// Since we ensure and assert that a query snapshot never exactly matches
+    /// the snapshot_min/snapshot_max of a table, we must use maxInt(u64) - 1
+    /// to query all non-deleted tables.
+    pub const latest: Snapshot = .{ .timestamp = std.math.maxInt(u64) - 1 };
+
+    timestamp: u64,
+
+    /// A table with TableInfo.snapshot_min=S was written during some commit with op<S.
+    /// A block with snapshot_min=S is definitely readable at op=S.
+    pub fn readable_at_commit(op: u64) u64 {
+        // TODO: This is going to become more complicated when snapshot numbers match the op
+        // acquiring the snapshot.
+        return op + 1;
+    }
+};
+
 const BlockPtr = *align(constants.sector_size) [block_size]u8;
 const BlockPtrConst = *align(constants.sector_size) const [block_size]u8;
 
@@ -161,7 +182,7 @@ pub const TableIndex = struct {
         assert(header.command == .block);
         assert(header.block_type == .index);
         assert(header.address > 0);
-        assert(header.snapshot > 0);
+        assert(header.snapshot.timestamp > 0);
 
         const header_metadata = metadata(index_block);
         const index = TableIndex.init(.{
@@ -318,7 +339,7 @@ pub const TableData = struct {
         assert(header.command == .block);
         assert(header.block_type == .data);
         assert(header.address > 0);
-        assert(header.snapshot > 0);
+        assert(header.snapshot.timestamp > 0);
 
         const header_metadata = metadata(data_block);
 
@@ -396,7 +417,7 @@ pub const TrailerNode = struct {
         assert(header.command == .block);
         assert(header.block_type == .free_set or header.block_type == .client_sessions);
         assert(header.address > 0);
-        assert(header.snapshot == 0);
+        assert(header.snapshot.timestamp == 0);
 
         const header_metadata = std.mem.bytesAsValue(Metadata, &header.metadata_bytes);
         assert(header_metadata.previous_trailer_block_checksum_padding == 0);
@@ -495,8 +516,8 @@ pub const ManifestNode = struct {
         checksum: u128,
         checksum_padding: u128 = 0,
         address: u64,
-        snapshot_min: u64,
-        snapshot_max: u64,
+        snapshot_min: Snapshot,
+        snapshot_max: Snapshot,
         value_count: u32,
         tree_id: u16,
         label: Label,
@@ -536,7 +557,7 @@ pub const ManifestNode = struct {
         assert(header.command == .block);
         assert(header.block_type == .manifest);
         assert(header.address > 0);
-        assert(header.snapshot == 0);
+        assert(header.snapshot.timestamp == 0);
 
         const header_metadata = std.mem.bytesAsValue(Metadata, &header.metadata_bytes);
         assert(header_metadata.entry_count > 0);

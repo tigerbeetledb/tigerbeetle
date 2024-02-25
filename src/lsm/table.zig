@@ -9,11 +9,11 @@ const binary_search = @import("binary_search.zig");
 
 const stdx = @import("../stdx.zig");
 const div_ceil = stdx.div_ceil;
-const snapshot_latest = @import("tree.zig").snapshot_latest;
 
 const allocate_block = @import("../vsr/grid.zig").allocate_block;
 const TreeTableInfoType = @import("manifest.zig").TreeTableInfoType;
 const schema = @import("schema.zig");
+const Snapshot = schema.Snapshot;
 
 pub const TableUsage = enum {
     /// General purpose table.
@@ -299,7 +299,7 @@ pub fn TableType(
             const DataFinishOptions = struct {
                 cluster: u128,
                 address: u64,
-                snapshot_min: u64,
+                snapshot_min: Snapshot,
                 tree_id: u16,
             };
 
@@ -396,7 +396,7 @@ pub fn TableType(
             const IndexFinishOptions = struct {
                 cluster: u128,
                 address: u64,
-                snapshot_min: u64,
+                snapshot_min: Snapshot,
                 tree_id: u16,
             };
 
@@ -443,7 +443,7 @@ pub fn TableType(
                     .value_count = builder.value_count_total,
                 };
 
-                assert(info.snapshot_max == math.maxInt(u64));
+                assert(info.snapshot_max.timestamp == math.maxInt(u64));
 
                 // Reset the builder to its initial state, leaving the buffers untouched.
                 builder.* = .{

@@ -12,6 +12,7 @@ const ScanMergeIntersectionType = @import("scan_merge.zig").ScanMergeIntersectio
 const ScanMergeDifferenceType = @import("scan_merge.zig").ScanMergeDifferenceType;
 const ScanBuffer = @import("scan_buffer.zig").ScanBuffer;
 const ScanState = @import("scan_state.zig").ScanState;
+const Snapshot = @import("schema.zig").Snapshot;
 
 const Direction = @import("../direction.zig").Direction;
 const TimestampRange = @import("timestamp_range.zig").TimestampRange;
@@ -109,7 +110,7 @@ pub fn ScanBuilderType(
             self: *ScanBuilder,
             comptime index: std.meta.FieldEnum(Groove.IndexTrees),
             buffer: *const ScanBuffer,
-            snapshot: u64,
+            snapshot: Snapshot,
             value: CompositeKeyPrefix(index),
             timestamp_range: TimestampRange,
             direction: Direction,
@@ -137,7 +138,7 @@ pub fn ScanBuilderType(
             self: *ScanBuilder,
             comptime index: std.meta.FieldEnum(Groove.IndexTrees),
             buffer: *const ScanBuffer,
-            snapshot: u64,
+            snapshot: Snapshot,
             min: CompositeKeyType(index),
             max: CompositeKeyType(index),
             direction: Direction,
@@ -414,7 +415,7 @@ pub fn ScanType(
             }
         }
 
-        pub fn snapshot(scan: *const Scan) u64 {
+        pub fn snapshot(scan: *const Scan) Snapshot {
             return switch (scan.dispatcher) {
                 inline else => |*scan_impl| scan_impl.snapshot,
             };

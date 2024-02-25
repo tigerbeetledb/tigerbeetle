@@ -477,8 +477,8 @@ pub fn ManifestLogType(comptime Storage: type) type {
             assert(manifest_log.grid_reservation != null);
             assert(table.label.level < constants.lsm_levels);
             assert(table.address > 0);
-            assert(table.snapshot_min > 0);
-            assert(table.snapshot_max > table.snapshot_min);
+            assert(table.snapshot_min.timestamp > 0);
+            assert(table.snapshot_max.timestamp > table.snapshot_min.timestamp);
 
             if (manifest_log.entry_count == 0) {
                 assert(manifest_log.blocks.count == manifest_log.blocks_closed);
@@ -892,7 +892,7 @@ pub fn ManifestLogType(comptime Storage: type) type {
             header.* = .{
                 .cluster = manifest_log.superblock.working.cluster,
                 .address = block_address,
-                .snapshot = 0, // TODO(snapshots): Set this properly; it is useful for debugging.
+                .snapshot = .{ .timestamp = 0 }, // TODO(snapshots): Set this properly; it is useful for debugging.
                 .size = undefined,
                 .command = .block,
                 .metadata_bytes = undefined, // Set by close_block().

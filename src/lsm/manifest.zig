@@ -10,8 +10,8 @@ const growth_factor = constants.lsm_growth_factor;
 const vsr = @import("../vsr.zig");
 const table_count_max = @import("tree.zig").table_count_max;
 const table_count_max_for_level = @import("tree.zig").table_count_max_for_level;
-const snapshot_latest = @import("tree.zig").snapshot_latest;
 const schema = @import("schema.zig");
+const Snapshot = schema.Snapshot;
 
 const TreeConfig = @import("tree.zig").TreeConfig;
 const Direction = @import("../direction.zig").Direction;
@@ -34,13 +34,13 @@ pub fn TreeTableInfoType(comptime Table: type) type {
 
         /// The minimum snapshot that can see this table (with exclusive bounds).
         /// - This value is set to the current snapshot tick on table creation.
-        snapshot_min: u64,
+        snapshot_min: Snapshot,
 
         /// The maximum snapshot that can see this table (with inclusive bounds).
         /// - This value is set to maxInt(64) when the table is created (output) by compaction.
         /// - This value is set to the current snapshot tick when the table is processed (input) by
         ///   compaction.
-        snapshot_max: u64 = math.maxInt(u64),
+        snapshot_max: Snapshot = Snapshot.max,
 
         key_min: Key, // Inclusive.
         key_max: Key, // Inclusive.
@@ -69,27 +69,27 @@ pub fn TreeTableInfoType(comptime Table: type) type {
         /// half-bar of compaction completes. At that point `tree.prefetch_snapshot_max` is
         /// updated (to the compaction's `compaction_op`), simultaneously rendering the old (input)
         /// tables invisible, and the new (output) tables visible.
-        pub fn visible(table: *const TreeTableInfo, snapshot: u64) bool {
+        pub fn visible(table: *const TreeTableInfo, snapshot: Snapshot) bool {
             assert(table.address != 0);
-            assert(table.snapshot_min <= table.snapshot_max);
-            assert(snapshot <= snapshot_latest);
+            assert(table.snapshot_min.timestamp <= table.snapshot_max.timestamp);
+            assert(snapshot.timestamp <= Snapshot.latest.timestamp);
 
-            return table.snapshot_min <= snapshot and snapshot <= table.snapshot_max;
+            return table.snapshot_min.timestamp <= snapshot.timestamp and snapshot.timestamp <= table.snapshot_max.timestamp;
         }
 
-        pub fn invisible(table: *const TreeTableInfo, snapshots: []const u64) bool {
+        pub fn invisible(table: *const TreeTableInfo, snapshots: []const Snapshot) bool {
             // Return early and do not iterate all snapshots if the table was never deleted:
-            if (table.visible(snapshot_latest)) return false;
+            if (table.visible(Snapshot.latest)) return false;
             for (snapshots) |snapshot| if (table.visible(snapshot)) return false;
-            assert(table.snapshot_max < math.maxInt(u64));
+            assert(table.snapshot_max.timestamp < math.maxInt(u64));
             return true;
         }
 
         pub fn equal(table: *const TreeTableInfo, other: *const TreeTableInfo) bool {
             return table.checksum == other.checksum and
                 table.address == other.address and
-                table.snapshot_min == other.snapshot_min and
-                table.snapshot_max == other.snapshot_max and
+                table.snapshot_min.timestamp == other.snapshot_min.timestamp and
+                table.snapshot_max.timestamp == other.snapshot_max.timestamp and
                 table.key_min == other.key_min and
                 table.key_max == other.key_max and
                 table.value_count == other.value_count;
@@ -192,7 +192,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
         // TODO Set this at startup when reading in the manifest.
         // This should be the greatest TableInfo.snapshot_min/snapshot_max (if deleted) or
         // registered snapshot seen so far.
-        snapshot_max: u64 = 1,
+        snapshot_max: Snapshot = .{ .timestamp = 1 },
 
         pub fn init(allocator: mem.Allocator, node_pool: *NodePool, config: TreeConfig) !Manifest {
             var levels: [constants.lsm_levels]Level = undefined;
@@ -258,7 +258,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
         pub fn update_table(
             manifest: *Manifest,
             level: u8,
-            snapshot: u64,
+            snapshot: Snapshot,
             table_ref: TableInfoReference,
         ) void {
             assert(manifest.manifest_log.?.opened);
@@ -268,9 +268,9 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
             if (constants.verify) {
                 assert(manifest_level.contains(table));
             }
-            assert(table.snapshot_max >= snapshot);
+            assert(table.snapshot_max.timestamp >= snapshot.timestamp);
             manifest_level.set_snapshot_max(snapshot, table_ref);
-            assert(table.snapshot_max == snapshot);
+            assert(table.snapshot_max.timestamp == snapshot.timestamp);
 
             // Append update changes to the manifest log.
             manifest.manifest_log.?.append(&table.encode(.{
@@ -289,7 +289,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
             assert(manifest.manifest_log.?.opened);
             assert(level_b == level_a + 1);
             assert(level_b < constants.lsm_levels);
-            assert(table.visible(snapshot_latest));
+            assert(table.visible(Snapshot.latest));
 
             const manifest_level_a = &manifest.levels[level_a];
             const manifest_level_b = &manifest.levels[level_b];
@@ -345,7 +345,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
         pub fn remove_invisible_tables(
             manifest: *Manifest,
             level: u8,
-            snapshots: []const u64,
+            snapshots: []const Snapshot,
             key_min: Key,
             key_max: Key,
         ) void {
@@ -369,7 +369,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
                 // Copy the table onto the stack: `remove_table()` doesn't allow pointers into
                 // SegmentedArray memory since it invalidates them.
                 const table: TreeTableInfo = table_pointer.*;
-                assert(table.snapshot_max < snapshot_latest);
+                assert(table.snapshot_max.timestamp < Snapshot.latest.timestamp);
                 assert(table.invisible(snapshots));
                 assert(key_min <= table.key_max);
                 assert(table.key_min <= key_max);
@@ -388,7 +388,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
 
         /// Returns an iterator over the tables visible to `snapshot` that may contain `key`
         /// (but are not guaranteed to), across all levels > `level_min`.
-        pub fn lookup(manifest: *Manifest, snapshot: u64, key: Key, level_min: u8) LookupIterator {
+        pub fn lookup(manifest: *Manifest, snapshot: Snapshot, key: Key, level_min: u8) LookupIterator {
             return .{
                 .manifest = manifest,
                 .snapshot = snapshot,
@@ -399,7 +399,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
 
         pub const LookupIterator = struct {
             manifest: *const Manifest,
-            snapshot: u64,
+            snapshot: Snapshot,
             key: Key,
             level: u8,
             inner: ?Level.Iterator = null,
@@ -411,7 +411,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
 
                     var inner = level.iterator(
                         .visible,
-                        @as(*const [1]u64, &it.snapshot),
+                        @as(*const [1]Snapshot, &it.snapshot),
                         .ascending,
                         KeyRange{ .key_min = it.key, .key_max = it.key },
                     );
@@ -440,7 +440,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
             }
         }
 
-        pub fn assert_no_invisible_tables(manifest: *const Manifest, snapshots: []const u64) void {
+        pub fn assert_no_invisible_tables(manifest: *const Manifest, snapshots: []const Snapshot) void {
             for (manifest.levels, 0..) |_, level| {
                 manifest.assert_no_invisible_tables_at_level(@intCast(level), snapshots);
             }
@@ -449,7 +449,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
         fn assert_no_invisible_tables_at_level(
             manifest: *const Manifest,
             level: u8,
-            snapshots: []const u64,
+            snapshots: []const Snapshot,
         ) void {
             var it = manifest.levels[level].iterator(.invisible, snapshots, .ascending, null);
             assert(it.next() == null);
@@ -460,7 +460,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
         /// * The table returned is visible to `snapshot`.
         pub fn next_table(manifest: *const Manifest, parameters: struct {
             level: u8,
-            snapshot: u64,
+            snapshot: Snapshot,
             key_min: Key,
             key_max: Key,
             key_exclusive: ?Key,
@@ -496,7 +496,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
 
             const least_overlap_table = manifest_level_a.table_with_least_overlap(
                 manifest_level_b,
-                snapshot_latest,
+                Snapshot.latest,
                 growth_factor,
             ) orelse return null;
 
@@ -528,7 +528,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
             const range = manifest_level.tables_overlapping_with_key_range(
                 key_min,
                 key_max,
-                snapshot_latest,
+                Snapshot.latest,
                 growth_factor,
             ).?;
 
@@ -556,7 +556,7 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
             while (level_c < constants.lsm_levels) : (level_c += 1) {
                 const manifest_level: *const Level = &manifest.levels[level_c];
                 if (manifest_level.next_table(.{
-                    .snapshot = snapshot_latest,
+                    .snapshot = Snapshot.latest,
                     .direction = .ascending,
                     .key_min = range.key_min,
                     .key_max = range.key_max,
@@ -573,8 +573,8 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
             return true;
         }
 
-        pub fn verify(manifest: *const Manifest, snapshot: u64) void {
-            assert(snapshot <= snapshot_latest);
+        pub fn verify(manifest: *const Manifest, snapshot: Snapshot) void {
+            assert(snapshot.timestamp <= Snapshot.latest.timestamp);
 
             switch (Table.usage) {
                 // Interior levels are non-empty.
@@ -602,7 +602,6 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
                 .secondary_index => {},
             }
 
-            const snapshot_from_commit = vsr.Snapshot.readable_at_commit;
             const vsr_state = &manifest.manifest_log.?.grid.superblock.working.vsr_state;
             for (&manifest.levels) |*level| {
                 var key_max_previous: ?Key = null;
@@ -617,8 +616,9 @@ pub fn ManifestType(comptime Table: type, comptime Storage: type) type {
                     assert(table_info.key_min <= table_info.key_max);
                     key_max_previous = table_info.key_max;
 
-                    if (table_snapshot < snapshot_from_commit(vsr_state.sync_op_min) or
-                        table_snapshot > snapshot_from_commit(vsr_state.sync_op_max))
+                    //FIXME
+                    if (table_snapshot.timestamp < Snapshot.readable_at_commit(vsr_state.sync_op_min) or
+                        table_snapshot.timestamp > Snapshot.readable_at_commit(vsr_state.sync_op_max))
                     {
                         Table.verify(
                             Storage,

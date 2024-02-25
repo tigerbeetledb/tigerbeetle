@@ -26,6 +26,7 @@ const assert = std.debug.assert;
 const stdx = @import("../stdx.zig");
 const constants = @import("../constants.zig");
 const TableInfo = @import("./schema.zig").ManifestNode.TableInfo;
+const Snapshot = @import("schema.zig").Snapshot;
 
 pub fn ForestTableIteratorType(comptime Forest: type) type {
     // struct { (Tree.name) → TreeTableIteratorType(Tree) }
@@ -155,7 +156,10 @@ fn TreeTableIteratorType(comptime Tree: type) type {
                                 .{
                                     // +1 to skip past the previous table.
                                     // (The tables are ordered by (key_max,snapshot_min).)
-                                    .snapshot_min = position.previous.snapshot_min + 1,
+                                    .snapshot_min = Snapshot{
+                                        //FIXME
+                                        .timestamp = position.previous.snapshot_min.timestamp + 1,
+                                    },
                                     .key_max = position.previous.key_max,
                                 },
                             )),
@@ -174,7 +178,7 @@ fn TreeTableIteratorType(comptime Tree: type) type {
 
             if (iterator.position) |position| {
                 switch (std.math.order(position.previous.key_max, table.key_max)) {
-                    .eq => assert(position.previous.snapshot_min < table.snapshot_min),
+                    .eq => assert(position.previous.snapshot_min.timestamp < table.snapshot_min.timestamp),
                     .lt => {},
                     .gt => unreachable,
                 }

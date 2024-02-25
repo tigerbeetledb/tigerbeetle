@@ -8,6 +8,7 @@ const vsr = @import("../vsr.zig");
 const Command = vsr.Command;
 const Operation = vsr.Operation;
 const schema = @import("../lsm/schema.zig");
+const Snapshot = schema.Snapshot;
 
 const checksum_body_empty = vsr.checksum(&.{});
 
@@ -1173,7 +1174,7 @@ pub const Header = extern struct {
 
         // Fields shared by all block types:
         address: u64,
-        snapshot: u64,
+        snapshot: Snapshot,
         block_type: schema.BlockType,
         reserved_block: [15]u8 = [_]u8{0} ** 15,
 

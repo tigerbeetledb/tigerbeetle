@@ -189,8 +189,8 @@ fn generate_events(
                 const table = TableInfo{
                     .checksum = 0,
                     .address = table_address,
-                    .snapshot_min = 1,
-                    .snapshot_max = std.math.maxInt(u64),
+                    .snapshot_min = .{ .timestamp = 1 },
+                    .snapshot_max = .{ .timestamp = std.math.maxInt(u64) },
                     .key_min = .{0} ** 16,
                     .key_max = .{0} ** 16,
                     .value_count = 1,
@@ -222,9 +222,9 @@ fn generate_events(
 
                 var table = tables.items[random.uintLessThan(usize, tables.items.len)];
                 // Only update a table snapshot_max once (like real compaction).
-                if (table.snapshot_max == 2) continue;
+                if (table.snapshot_max.timestamp == 2) continue;
                 table.label.event = .update;
-                table.snapshot_max = 2;
+                table.snapshot_max = .{ .timestamp = 2 };
                 try events.append(.{ .append = table });
             }
         }
@@ -233,7 +233,7 @@ fn generate_events(
         // mimic how compaction is followed by remove_invisible_tables().
         var i: usize = 0;
         while (i < tables.items.len) {
-            if (tables.items[i].snapshot_max == 2) {
+            if (tables.items[i].snapshot_max.timestamp == 2) {
                 var table = tables.swapRemove(i);
                 table.label.event = .remove;
                 try events.append(.{ .append = table });

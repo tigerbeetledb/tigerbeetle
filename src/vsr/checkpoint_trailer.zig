@@ -397,7 +397,7 @@ pub fn CheckpointTrailerType(comptime Storage: type) type {
                 .cluster = trailer.grid.?.superblock.working.cluster,
                 .metadata_bytes = @bitCast(metadata),
                 .address = trailer.block_addresses[trailer.block_index],
-                .snapshot = 0, // TODO(snapshots): Set this properly; it is useful for debugging.
+                .snapshot = .{ .timestamp = 0 }, // TODO(snapshots): Set this properly; it is useful for debugging.
                 .size = @sizeOf(vsr.Header) + chunk_size,
                 .command = .block,
                 .block_type = trailer.trailer_type.block_type(),

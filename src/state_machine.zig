@@ -9,12 +9,13 @@ const tracer = @import("tracer.zig");
 const stdx = @import("./stdx.zig");
 const global_constants = @import("constants.zig");
 const tb = @import("tigerbeetle.zig");
-const snapshot_latest = @import("lsm/tree.zig").snapshot_latest;
 const ScopeCloseMode = @import("lsm/tree.zig").ScopeCloseMode;
 const WorkloadType = @import("state_machine/workload.zig").WorkloadType;
 
 const Direction = @import("direction.zig").Direction;
 const TimestampRange = @import("lsm/timestamp_range.zig").TimestampRange;
+
+const Snapshot = @import("lsm/schema.zig").Snapshot;
 
 const Account = tb.Account;
 const AccountFlags = tb.AccountFlags;
@@ -857,7 +858,7 @@ pub fn StateMachineType(
                 scan_conditions.append_assume_capacity(scan_builder.scan_prefix(
                     .debit_account_id,
                     self.forest.scan_buffer_pool.acquire_assume_capacity(),
-                    snapshot_latest,
+                    Snapshot.latest,
                     filter.account_id,
                     timestamp_range,
                     direction,
@@ -869,7 +870,7 @@ pub fn StateMachineType(
                 scan_conditions.append_assume_capacity(scan_builder.scan_prefix(
                     .credit_account_id,
                     self.forest.scan_buffer_pool.acquire_assume_capacity(),
-                    snapshot_latest,
+                    Snapshot.latest,
                     filter.account_id,
                     timestamp_range,
                     direction,

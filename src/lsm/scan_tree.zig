@@ -11,7 +11,6 @@ const stdx = @import("../stdx.zig");
 const maybe = stdx.maybe;
 const constants = @import("../constants.zig");
 const lsm = @import("tree.zig");
-const snapshot_latest = @import("tree.zig").snapshot_latest;
 const schema = @import("schema.zig");
 const binary_search = @import("binary_search.zig");
 const k_way_merge = @import("k_way_merge.zig");
@@ -27,6 +26,7 @@ const ScanBuffer = @import("scan_buffer.zig").ScanBuffer;
 const ScanState = @import("scan_state.zig").ScanState;
 const LevelTableValueBlockIteratorType =
     @import("level_data_iterator.zig").LevelTableValueBlockIteratorType;
+const Snapshot = schema.Snapshot;
 
 /// Scans a range of keys over a Tree, in ascending or descending order.
 /// At a high level, this is an ordered iterator over the values in a tree, at a particular
@@ -130,7 +130,7 @@ pub fn ScanTreeType(
         direction: Direction,
         key_min: Key,
         key_max: Key,
-        snapshot: u64,
+        snapshot: Snapshot,
 
         table_mutable_values: []const Value,
         table_immutable_values: []const Value,
@@ -166,7 +166,7 @@ pub fn ScanTreeType(
         pub fn init(
             tree: *Tree,
             buffer: *const ScanBuffer,
-            snapshot: u64,
+            snapshot: Snapshot,
             key_min: Key,
             key_max: Key,
             direction: Direction,
@@ -174,7 +174,7 @@ pub fn ScanTreeType(
             assert(key_min <= key_max);
 
             const table_mutable_values: []const Value = blk: {
-                if (snapshot != snapshot_latest) break :blk &.{};
+                if (snapshot.timestamp != Snapshot.latest.timestamp) break :blk &.{};
 
                 tree.table_mutable.sort();
                 const values = tree.table_mutable.values_used();
@@ -190,8 +190,8 @@ pub fn ScanTreeType(
             };
 
             const table_immutable_values: []const Value = blk: {
-                if (snapshot <
-                    tree.table_immutable.mutability.immutable.snapshot_min) break :blk &.{};
+                if (snapshot.timestamp <
+                    tree.table_immutable.mutability.immutable.snapshot_min.timestamp) break :blk &.{};
 
                 const values = tree.table_immutable.values_used();
                 const range = binary_search.binary_search_values_range(

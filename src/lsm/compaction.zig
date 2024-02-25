@@ -52,6 +52,7 @@ const schema = @import("schema.zig");
 const TableDataIteratorType = @import("table_data_iterator.zig").TableDataIteratorType;
 const LevelTableValueBlockIteratorType =
     @import("level_data_iterator.zig").LevelTableValueBlockIteratorType;
+const Snapshot = schema.Snapshot;
 
 pub fn CompactionType(
     comptime Table: type,
@@ -357,9 +358,12 @@ pub fn CompactionType(
                     .{ compaction.tree_config.name, context.level_b },
                 );
 
-                const snapshot_max = snapshot_max_for_table_input(context.op_min);
+                const snapshot_max = Snapshot{
+                    //FIXME
+                    .timestamp = snapshot_max_for_table_input(context.op_min),
+                };
                 const table_a = context.table_info_a.disk.table_info;
-                assert(table_a.snapshot_max >= snapshot_max);
+                assert(table_a.snapshot_max.timestamp >= snapshot_max.timestamp);
 
                 compaction.manifest_entries.append_assume_capacity(.{
                     .operation = .move_to_level_b,
@@ -379,7 +383,10 @@ pub fn CompactionType(
                 compaction.iterator_b.start(.{
                     .grid = context.grid,
                     .level = context.level_b,
-                    .snapshot = context.op_min,
+                    .snapshot = Snapshot{
+                        // FIXME
+                        .timestamp = context.op_min,
+                    },
                     .tables = .{ .compaction = compaction.context.range_b.tables.const_slice() },
                     .index_block = compaction.index_block_b,
                     .direction = .ascending,
@@ -819,7 +826,10 @@ pub fn CompactionType(
                 table_builder.data_block_finish(.{
                     .cluster = compaction.context.grid.superblock.working.cluster,
                     .address = compaction.context.grid.acquire(compaction.grid_reservation.?),
-                    .snapshot_min = snapshot_min_for_table_output(compaction.context.op_min),
+                    .snapshot_min = Snapshot{
+                        // FIXME
+                        .timestamp = snapshot_min_for_table_output(compaction.context.op_min),
+                    },
                     .tree_id = compaction.tree_config.id,
                 });
                 WriteBlock(.data).write_block(compaction);
@@ -833,7 +843,10 @@ pub fn CompactionType(
                 const table = table_builder.index_block_finish(.{
                     .cluster = compaction.context.grid.superblock.working.cluster,
                     .address = compaction.context.grid.acquire(compaction.grid_reservation.?),
-                    .snapshot_min = snapshot_min_for_table_output(compaction.context.op_min),
+                    .snapshot_min = Snapshot{
+                        // FIXME
+                        .timestamp = snapshot_min_for_table_output(compaction.context.op_min),
+                    },
                     .tree_id = compaction.tree_config.id,
                 });
                 // Make this table visible at the end of this half-bar.
@@ -946,7 +959,10 @@ pub fn CompactionType(
             // - manifest updates are not visible until after the blocks are all on disk.
             const manifest = &compaction.context.tree.manifest;
             const level_b = compaction.context.level_b;
-            const snapshot_max = snapshot_max_for_table_input(compaction.context.op_min);
+            const snapshot_max = Snapshot{
+                //FIXME
+                .timestamp = snapshot_max_for_table_input(compaction.context.op_min),
+            };
 
             if (compaction.move_table) {
                 // If no compaction is required, don't update snapshot_max.

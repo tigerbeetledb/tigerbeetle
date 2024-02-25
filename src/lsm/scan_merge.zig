@@ -8,6 +8,7 @@ const ScanState = @import("scan_state.zig").ScanState;
 const Direction = @import("../direction.zig").Direction;
 const KWayMergeIteratorType = @import("k_way_merge.zig").KWayMergeIteratorType;
 const ScanType = @import("scan_builder.zig").ScanType;
+const Snapshot = @import("schema.zig").Snapshot;
 
 /// Union ∪ operation over an array of non-specialized `Scan` instances.
 /// At a high level, this is an ordered iterator over the set-union of the timestamps of
@@ -60,7 +61,7 @@ pub fn ScanMergeUnionType(
         );
 
         direction: Direction,
-        snapshot: u64,
+        snapshot: Snapshot,
         scan_context: Scan.Context = .{ .callback = &scan_read_callback },
 
         state: union(ScanState) {
@@ -105,7 +106,7 @@ pub fn ScanMergeUnionType(
                 assert(scan.timestamp_direction().? == direction_first);
 
                 // All inner scans must have the same snapshot.
-                assert(scan.snapshot() == snapshot_first);
+                assert(scan.snapshot().timestamp == snapshot_first.timestamp);
             };
 
             var self = ScanMergeUnion{

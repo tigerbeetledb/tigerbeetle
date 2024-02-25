@@ -28,7 +28,7 @@ const VSRState = vsr.VSRState;
 const SyncStage = vsr.SyncStage;
 const SyncTarget = vsr.SyncTarget;
 const ClientSessions = vsr.ClientSessions;
-
+const Snapshot = @import("../lsm/schema.zig").Snapshot;
 const log = stdx.log.scoped(.replica);
 const tracer = @import("../tracer.zig");
 
@@ -8080,15 +8080,15 @@ pub fn ReplicaType(
             assert(self.superblock.working.vsr_state.sync_op_max > 0);
             assert(self.grid_repair_tables.available() > 0);
 
-            const snapshot_from_commit = vsr.Snapshot.readable_at_commit;
             const sync_op_min = self.superblock.working.vsr_state.sync_op_min;
             const sync_op_max = self.superblock.working.vsr_state.sync_op_max;
             while (self.sync_tables.?.next(&self.state_machine.forest)) |table_info| {
                 assert(self.grid_repair_tables.available() > 0);
                 assert(table_info.label.event == .reserved);
 
-                if (table_info.snapshot_min >= snapshot_from_commit(sync_op_min) and
-                    table_info.snapshot_min <= snapshot_from_commit(sync_op_max))
+                //FIXME
+                if (table_info.snapshot_min.timestamp >= Snapshot.readable_at_commit(sync_op_min) and
+                    table_info.snapshot_min.timestamp <= Snapshot.readable_at_commit(sync_op_max))
                 {
                     log.debug("{}: sync_enqueue_tables: " ++
                         "request address={} checksum={} level={} snapshot_min={} ({}..{})", .{
@@ -8097,8 +8097,8 @@ pub fn ReplicaType(
                         table_info.checksum,
                         table_info.label.level,
                         table_info.snapshot_min,
-                        snapshot_from_commit(sync_op_min),
-                        snapshot_from_commit(sync_op_max),
+                        Snapshot.readable_at_commit(sync_op_min),
+                        Snapshot.readable_at_commit(sync_op_max),
                     });
 
                     const table = self.grid_repair_tables.acquire().?;

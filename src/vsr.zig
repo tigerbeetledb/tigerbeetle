@@ -1389,13 +1389,3 @@ pub const Checkpoint = struct {
         return op == 0 or (op + 1) % constants.lsm_batch_multiple == 0;
     }
 };
-
-pub const Snapshot = struct {
-    /// A table with TableInfo.snapshot_min=S was written during some commit with op<S.
-    /// A block with snapshot_min=S is definitely readable at op=S.
-    pub fn readable_at_commit(op: u64) u64 {
-        // TODO: This is going to become more complicated when snapshot numbers match the op
-        // acquiring the snapshot.
-        return op + 1;
-    }
-};

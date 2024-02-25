@@ -14,6 +14,7 @@ const BlockPtr = @import("../vsr/grid.zig").BlockPtr;
 const BlockPtrConst = @import("../vsr/grid.zig").BlockPtrConst;
 const Direction = @import("../direction.zig").Direction;
 const TableDataIteratorType = @import("table_data_iterator.zig").TableDataIteratorType;
+const Snapshot = schema.Snapshot;
 
 // Iterates over the data blocks in a level B table. References to the level B
 // tables to be iterated over are passed via the `tables` field in the context,
@@ -37,7 +38,7 @@ pub fn LevelTableValueBlockIteratorType(comptime Table: type, comptime Storage: 
         pub const Context = struct {
             grid: *Grid,
             level: u8,
-            snapshot: u64,
+            snapshot: Snapshot,
             index_block: BlockPtr,
             // `tables` contains TableInfo references from ManifestLevel.
             tables: union(enum) {

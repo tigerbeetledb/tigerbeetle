@@ -15,6 +15,7 @@ const stdx = @import("../stdx.zig");
 const constants = @import("../constants.zig");
 const vsr = @import("../vsr.zig");
 const schema = @import("schema.zig");
+const Snapshot = schema.Snapshot;
 
 const CompositeKeyType = @import("composite_key.zig").CompositeKeyType;
 const NodePool = @import("node_pool.zig").NodePool(constants.lsm_manifest_node_size, 16);
@@ -24,13 +25,6 @@ const BlockPtrConst = @import("../vsr/grid.zig").BlockPtrConst;
 
 pub const ScopeCloseMode = enum { persist, discard };
 const snapshot_min_for_table_output = @import("compaction.zig").snapshot_min_for_table_output;
-
-/// We reserve maxInt(u64) to indicate that a table has not been deleted.
-/// Tables that have not been deleted have snapshot_max of maxInt(u64).
-/// Since we ensure and assert that a query snapshot never exactly matches
-/// the snapshot_min/snapshot_max of a table, we must use maxInt(u64) - 1
-/// to query all non-deleted tables.
-pub const snapshot_latest: u64 = math.maxInt(u64) - 1;
 
 const half_bar_beat_count = @divExact(constants.lsm_batch_multiple, 2);
 
@@ -286,8 +280,8 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
         /// guaranteed to not be present.
         ///
         /// Specifically, it checks whether the key exists within the Tree's key range.
-        pub fn key_range_contains(tree: *const Tree, snapshot: u64, key: Key) bool {
-            if (snapshot == snapshot_latest) {
+        pub fn key_range_contains(tree: *const Tree, snapshot: Snapshot, key: Key) bool {
+            if (snapshot.timestamp == Snapshot.latest.timestamp) {
                 return tree.key_range != null and
                     tree.key_range.?.key_min <= key and
                     key <= tree.key_range.?.key_max;
@@ -318,7 +312,7 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
         /// the existence of the key in the data block. If any of the blocks needed to
         /// ascertain the existence of the key are not in the Grid cache, it bails out.
         /// The returned `.positive` Value pointer is only valid synchronously.
-        pub fn lookup_from_levels_cache(tree: *Tree, snapshot: u64, key: Key) LookupMemoryResult {
+        pub fn lookup_from_levels_cache(tree: *Tree, snapshot: Snapshot, key: Key) LookupMemoryResult {
             var iterator = tree.manifest.lookup(snapshot, key, 0);
             while (iterator.next()) |table| {
                 const index_block = tree.grid.read_block_from_cache(
@@ -379,7 +373,7 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
         pub fn lookup_from_levels_storage(tree: *Tree, parameters: struct {
             callback: *const fn (*LookupContext, ?*const Value) void,
             context: *LookupContext,
-            snapshot: u64,
+            snapshot: Snapshot,
             key: Key,
             level_min: u8,
         }) void {
@@ -556,7 +550,7 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
             tree.compaction_op = tree.grid.superblock.working.vsr_state.checkpoint.commit_min;
             tree.key_range = tree.manifest.key_range();
 
-            tree.manifest.verify(snapshot_latest);
+            tree.manifest.verify(Snapshot.latest);
             assert(tree.compaction_op.? == 0 or
                 (tree.compaction_op.? + 1) % constants.lsm_batch_multiple == 0);
             maybe(tree.key_range == null);
@@ -643,8 +637,9 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
 
             tree.compaction_phase = .running;
 
+            //FIXME
             const op_min = compaction_op_min(tree.compaction_op.?);
-            assert(op_min < snapshot_latest);
+            assert(op_min < Snapshot.latest.timestamp);
             assert(op_min % half_bar_beat_count == 0);
 
             const compaction_beat = tree.compaction_op.? % constants.lsm_batch_multiple;
@@ -669,7 +664,12 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
             switch (beat_kind) {
                 .half_bar_start => {
                     if (constants.verify) {
-                        tree.manifest.verify(tree.compaction_op.?);
+                        tree.manifest.verify(
+                            Snapshot{
+                                //FIXME
+                                .timestamp = tree.compaction_op.?,
+                            },
+                        );
                     }
 
                     // Corresponds to compact_finish_join_next_tick() (during half_bar_end).
@@ -732,7 +732,7 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
             log.debug("{s}: compacting immutable table to level 0 " ++
                 "(snapshot_min={d} compaction.op_min={d} table_count={d})", .{
                 tree.config.name,
-                tree.table_immutable.mutability.immutable.snapshot_min,
+                tree.table_immutable.mutability.immutable.snapshot_min.timestamp,
                 op_min,
                 range_b.tables.count() + 1,
             });
@@ -856,7 +856,7 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
             tree.compaction_phase = .running_done;
 
             if (constants.verify) {
-                tree.manifest.verify(snapshot_latest);
+                tree.manifest.verify(Snapshot.latest);
             }
 
             tracer.end(
@@ -881,7 +881,10 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
                 compaction_beat == constants.lsm_batch_multiple - 1)
             {
                 tree.swap_mutable_and_immutable(
-                    snapshot_min_for_table_output(compaction_op_min(tree.compaction_op.?)),
+                    //FIXME
+                    Snapshot{
+                        .timestamp = snapshot_min_for_table_output(compaction_op_min(tree.compaction_op.?)),
+                    },
                 );
             }
 
@@ -927,7 +930,10 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
 
             if (compaction_beat == constants.lsm_batch_multiple - 1) {
                 tree.swap_mutable_and_immutable(
-                    snapshot_min_for_table_output(compaction_op_min(tree.compaction_op.?)),
+                    Snapshot{
+                        //FIXME
+                        .timestamp = snapshot_min_for_table_output(compaction_op_min(tree.compaction_op.?)),
+                    },
                 );
             }
 
@@ -972,12 +978,12 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
         }
 
         /// Called after the last beat of a full compaction bar.
-        fn swap_mutable_and_immutable(tree: *Tree, snapshot_min: u64) void {
+        fn swap_mutable_and_immutable(tree: *Tree, snapshot_min: Snapshot) void {
             assert(tree.table_mutable.mutability == .mutable);
             assert(tree.table_immutable.mutability == .immutable);
             assert(tree.table_immutable.mutability.immutable.flushed);
-            assert(snapshot_min > 0);
-            assert(snapshot_min < snapshot_latest);
+            assert(snapshot_min.timestamp > 0);
+            assert(snapshot_min.timestamp < Snapshot.latest.timestamp);
 
             assert((tree.compaction_op.? + 1) % constants.lsm_batch_multiple == 0);
 

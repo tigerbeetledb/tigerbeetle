@@ -31,6 +31,7 @@ const constants = @import("../constants.zig");
 const fuzz = @import("../testing/fuzz.zig");
 const binary_search = @import("binary_search.zig");
 const lsm = @import("tree.zig");
+const Snapshot = @import("schema.zig").Snapshot;
 const allocator = fuzz.allocator;
 
 const Key = u64;
@@ -238,7 +239,7 @@ pub fn EnvironmentType(comptime table_count_max: u32, comptime node_size: u32) t
         buffer: TableBuffer,
         tables: TableBuffer,
         random: std.rand.Random,
-        snapshot: u64,
+        snapshot: Snapshot,
 
         pub fn init(random: std.rand.Random) !Environment {
             var env: Environment = undefined;
@@ -258,7 +259,7 @@ pub fn EnvironmentType(comptime table_count_max: u32, comptime node_size: u32) t
             errdefer env.tables.deinit();
 
             env.random = random;
-            env.snapshot = 1; // the first snapshot is reserved.
+            env.snapshot = .{ .timestamp = 1 }; // the first snapshot is reserved.
             return env;
         }
 
@@ -304,7 +305,7 @@ pub fn EnvironmentType(comptime table_count_max: u32, comptime node_size: u32) t
             // Insert the generated tables into the ManifestLevel:
             for (tables) |*table| {
                 assert(table.visible(env.snapshot));
-                assert(table.visible(lsm.snapshot_latest));
+                assert(table.visible(Snapshot.latest));
                 env.level.insert_table(&env.pool, table);
             }
 
@@ -379,12 +380,12 @@ pub fn EnvironmentType(comptime table_count_max: u32, comptime node_size: u32) t
 
             // Only update the snapshot_max of those visible to snapshot_latest.
             // Those visible to env.snapshot would include tables with updated snapshot_max.
-            const snapshots = @as(*const [1]u64, &lsm.snapshot_latest);
+            const snapshots = @as(*const [1]Snapshot, &Snapshot.latest);
 
             var it = env.level.iterator(.visible, snapshots, .descending, null);
             while (it.next()) |level_table| {
                 assert(level_table.visible(env.snapshot));
-                assert(level_table.visible(lsm.snapshot_latest));
+                assert(level_table.visible(Snapshot.latest));
 
                 const env_table = env.find_exact(level_table);
                 assert(level_table.equal(env_table));
@@ -396,8 +397,8 @@ pub fn EnvironmentType(comptime table_count_max: u32, comptime node_size: u32) t
                 // This is required to keep the table in the fuzzer's environment consistent with
                 // the table in the ManifestLevel.
                 env_table.snapshot_max = env.snapshot;
-                assert(level_table.snapshot_max == env.snapshot);
-                assert(!level_table.visible(lsm.snapshot_latest));
+                assert(level_table.snapshot_max.timestamp == env.snapshot.timestamp);
+                assert(!level_table.visible(Snapshot.latest));
                 assert(level_table.visible(env.snapshot));
 
                 update_amount -= 1;
@@ -431,8 +432,8 @@ pub fn EnvironmentType(comptime table_count_max: u32, comptime node_size: u32) t
         }
 
         fn take_snapshot(env: *Environment) !void {
-            env.snapshot += 1;
-            assert(env.snapshot < lsm.snapshot_latest);
+            env.snapshot.timestamp += 1;
+            assert(env.snapshot.timestamp < Snapshot.latest.timestamp);
         }
 
         fn remove_invisible(env: *Environment, amount: usize) !void {
@@ -440,7 +441,7 @@ pub fn EnvironmentType(comptime table_count_max: u32, comptime node_size: u32) t
             assert(amount > 0);
 
             // Remove tables not visible to the current snapshot.
-            const snapshots = [_]u64{env.snapshot};
+            const snapshots = [_]Snapshot{env.snapshot};
 
             // Remove invisible tables from ManifestLevel and mark them as removed in env.tables:
             var it = env.level.iterator(.invisible, &snapshots, .descending, null);
@@ -464,14 +465,14 @@ pub fn EnvironmentType(comptime table_count_max: u32, comptime node_size: u32) t
             assert(amount > 0);
 
             // ManifestLevel.remove_table_visible() only removes those visible to snapshot_latest.
-            const snapshots = @as(*const [1]u64, &lsm.snapshot_latest);
+            const snapshots = @as(*const [1]Snapshot, &Snapshot.latest);
 
             // Remove visible tables from ManifestLevel and mark them as removed in env.tables:
             var it = env.level.iterator(.visible, snapshots, .descending, null);
             while (it.next()) |level_table| {
                 env.mark_removed_table(level_table);
 
-                assert(level_table.visible(lsm.snapshot_latest));
+                assert(level_table.visible(Snapshot.latest));
                 var level_table_copy = level_table.*;
                 env.level.remove_table(&env.pool, &level_table_copy);
 

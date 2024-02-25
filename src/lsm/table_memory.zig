@@ -5,6 +5,9 @@ const assert = std.debug.assert;
 
 const constants = @import("../constants.zig");
 const binary_search = @import("binary_search.zig");
+const schema = @import("schema.zig");
+
+const Snapshot = schema.Snapshot;
 
 pub fn TableMemoryType(comptime Table: type) type {
     const Key = Table.Key;
@@ -25,7 +28,7 @@ pub fn TableMemoryType(comptime Table: type) type {
             immutable: struct {
                 /// An empty table has nothing to flush
                 flushed: bool = true,
-                snapshot_min: u64 = 0,
+                snapshot_min: Snapshot = .{ .timestamp = 0 },
             },
         };
 
@@ -107,7 +110,7 @@ pub fn TableMemoryType(comptime Table: type) type {
             );
         }
 
-        pub fn make_immutable(table: *TableMemory, snapshot_min: u64) void {
+        pub fn make_immutable(table: *TableMemory, snapshot_min: Snapshot) void {
             assert(table.mutability == .mutable);
             assert(table.value_context.count <= value_count_max);
 
@@ -202,7 +205,7 @@ test "table_memory: unit" {
     assert(table_memory.value_context.sorted);
 
     table_memory.put(&.{ .key = 0, .value = 0, .tombstone = false });
-    table_memory.make_immutable(0);
+    table_memory.make_immutable(Snapshot{ .timestamp = 0 });
 
     assert(table_memory.count() == 4 and table_memory.value_context.count == 4);
     assert(table_memory.key_min() == 0);

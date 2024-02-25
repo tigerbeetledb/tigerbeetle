@@ -12,6 +12,7 @@ const log = std.log.scoped(.lsm_forest_fuzz);
 const tracer = @import("../tracer.zig");
 const lsm = @import("tree.zig");
 const tb = @import("../tigerbeetle.zig");
+const Snapshot = @import("schema.zig").Snapshot;
 
 const Transfer = @import("../tigerbeetle.zig").Transfer;
 const Account = @import("../tigerbeetle.zig").Account;
@@ -406,7 +407,7 @@ const Environment = struct {
             const scan_range = scan_builder.scan_range(
                 index,
                 scan_buffer,
-                lsm.snapshot_latest,
+                Snapshot.latest,
                 .{ .field = min, .timestamp = 0 },
                 .{ .field = max, .timestamp = std.math.maxInt(u63) },
                 params.direction,

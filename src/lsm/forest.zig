@@ -605,8 +605,8 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                 assert(std.meta.eql(table_latest.table.key_max, forest_table_item.key_max));
                 assert(table_latest.table.checksum == forest_table_item.checksum);
                 assert(table_latest.table.address == forest_table_item.address);
-                assert(table_latest.table.snapshot_min == forest_table_item.snapshot_min);
-                assert(table_latest.table.snapshot_max == forest_table_item.snapshot_max);
+                assert(table_latest.table.snapshot_min.timestamp == forest_table_item.snapshot_min.timestamp);
+                assert(table_latest.table.snapshot_max.timestamp == forest_table_item.snapshot_max.timestamp);
                 assert(table_latest.table.tree_id == forest_table_item.tree_id);
 
                 const table_removed = tables_latest.remove(forest_table_item.checksum);

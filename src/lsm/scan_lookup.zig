@@ -5,10 +5,10 @@ const Allocator = std.mem.Allocator;
 
 const stdx = @import("../stdx.zig");
 const constants = @import("../constants.zig");
-const snapshot_latest = @import("tree.zig").snapshot_latest;
 
 const GridType = @import("../vsr/grid.zig").GridType;
 const ScanType = @import("scan_builder.zig").ScanType;
+const Snapshot = @import("schema.zig").Snapshot;
 
 /// Implements the lookup logic for loading objects from scans.
 pub fn ScanLookupType(
@@ -164,7 +164,7 @@ pub fn ScanLookupType(
                     objects.table_immutable.get(timestamp)) |object|
                 {
                     // TODO(batiati) Handle this properly when we implement snapshot queries.
-                    assert(self.scan.snapshot() == snapshot_latest);
+                    assert(self.scan.snapshot().timestamp == Snapshot.latest.timestamp);
 
                     // Object present in table mutable/immutable,
                     // continue the loop to fetch the next one.
