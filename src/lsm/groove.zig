@@ -472,7 +472,7 @@ pub fn GrooveType(
             self.* = undefined;
         }
 
-        fn reset(self: *TimestampSet) void {
+        pub fn reset(self: *TimestampSet) void {
             self.map.clearRetainingCapacity();
         }
 
@@ -757,8 +757,6 @@ pub fn GrooveType(
 
             groove.prefetch_snapshot = snapshot_target;
             assert(groove.prefetch_keys.count() == 0);
-
-            if (has_id) groove.timestamps.reset();
         }
 
         /// This must be called by the state machine for every key to be prefetched.

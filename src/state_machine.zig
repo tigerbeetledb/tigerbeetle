@@ -392,35 +392,43 @@ pub fn StateMachineType(
             cache_entries_account_balances: u32,
         };
 
-        /// Since prefetch contexts are used one at a time, it's safe to access
-        /// the union's fields and reuse the same memory for all context instances.
-        const PrefetchContext = union(enum) {
-            null,
-            accounts: AccountsGroove.PrefetchContext,
-            transfers: TransfersGroove.PrefetchContext,
-            transfers_pending: TransfersPendingGroove.PrefetchContext,
+        const PrefetchContext = struct {
+            const Fields = struct {
+                accounts: AccountsGroove.PrefetchContext,
+                transfers: TransfersGroove.PrefetchContext,
+                transfers_pending: TransfersPendingGroove.PrefetchContext,
+            };
+            const Tag = std.meta.FieldEnum(Fields);
+            const EnumSet = std.EnumSet(Tag);
 
-            pub const Field = std.meta.FieldEnum(PrefetchContext);
-            pub fn FieldType(comptime field: Field) type {
-                return std.meta.fieldInfo(PrefetchContext, field).type;
+            fields: Fields = undefined,
+            used: EnumSet = EnumSet.initEmpty(),
+
+            fn get(
+                context: *PrefetchContext,
+                comptime tag: Tag,
+            ) *std.meta.FieldType(Fields, tag) {
+                assert(!context.used.contains(tag));
+                context.used.insert(tag);
+                return &@field(context.fields, @tagName(tag));
             }
 
-            pub fn parent(
-                comptime field: Field,
-                completion: *FieldType(field),
+            fn complete(
+                comptime tag: Tag,
+                completion: *std.meta.FieldType(Fields, tag),
             ) *StateMachine {
-                comptime assert(field != .null);
+                const fields: *Fields = @fieldParentPtr(@tagName(tag), completion);
+                const context: *PrefetchContext = @fieldParentPtr("fields", fields);
+                const state_machine: *StateMachine = @fieldParentPtr("prefetch_context", context);
 
-                const context: *PrefetchContext = @fieldParentPtr(@tagName(field), completion);
-                return @fieldParentPtr("prefetch_context", context);
+                assert(context.used.contains(tag));
+                context.used.remove(tag);
+
+                return state_machine;
             }
 
-            pub fn get(self: *PrefetchContext, comptime field: Field) *FieldType(field) {
-                comptime assert(field != .null);
-                assert(self.* == .null);
-
-                self.* = @unionInit(PrefetchContext, @tagName(field), undefined);
-                return &@field(self, @tagName(field));
+            fn idle(context: *const PrefetchContext) bool {
+                return context.used.count() == 0;
             }
         };
 
@@ -467,7 +475,7 @@ pub fn StateMachineType(
 
         prefetch_input: ?[]align(16) const u8 = null,
         prefetch_callback: ?*const fn (*StateMachine) void = null,
-        prefetch_context: PrefetchContext = .null,
+        prefetch_context: PrefetchContext = .{},
 
         scan_lookup: ScanLookup = .null,
         scan_lookup_buffer: []align(16) u8,
@@ -668,8 +676,12 @@ pub fn StateMachineType(
             self.prefetch_callback = callback;
 
             // TODO(Snapshots) Pass in the target snapshot.
+            // TODO: Review the `prefetch_setup` API.
+            // We need to support multiple calls to `prefetch()` for the same groove.
             self.forest.grooves.accounts.prefetch_setup(null);
+            self.forest.grooves.accounts.timestamps.reset();
             self.forest.grooves.transfers.prefetch_setup(null);
+            self.forest.grooves.transfers.timestamps.reset();
             self.forest.grooves.transfers_pending.prefetch_setup(null);
 
             return switch (operation) {
@@ -706,7 +718,7 @@ pub fn StateMachineType(
 
         fn prefetch_finish(self: *StateMachine) void {
             assert(self.prefetch_input != null);
-            assert(self.prefetch_context == .null);
+            assert(self.prefetch_context.idle());
             assert(self.scan_lookup == .null);
 
             const callback = self.prefetch_callback.?;
@@ -717,6 +729,8 @@ pub fn StateMachineType(
         }
 
         fn prefetch_create_accounts(self: *StateMachine, accounts: []const Account) void {
+            assert(self.prefetch_context.idle());
+
             for (accounts) |*a| {
                 self.forest.grooves.accounts.prefetch_enqueue(a.id);
             }
@@ -730,8 +744,8 @@ pub fn StateMachineType(
         fn prefetch_create_accounts_callback(
             completion: *AccountsGroove.PrefetchContext,
         ) void {
-            const self: *StateMachine = PrefetchContext.parent(.accounts, completion);
-            self.prefetch_context = .null;
+            const self: *StateMachine = PrefetchContext.complete(.accounts, completion);
+            assert(self.prefetch_context.idle());
 
             const accounts = mem.bytesAsSlice(Account, self.prefetch_input.?);
             if (accounts.len > 0 and
@@ -754,43 +768,28 @@ pub fn StateMachineType(
         fn prefetch_create_accounts_transfers_callback(
             completion: *TransfersGroove.PrefetchContext,
         ) void {
-            const self: *StateMachine = PrefetchContext.parent(.transfers, completion);
-            self.prefetch_context = .null;
+            const self: *StateMachine = PrefetchContext.complete(.transfers, completion);
+            assert(self.prefetch_context.idle());
 
             self.prefetch_finish();
         }
 
         fn prefetch_create_transfers(self: *StateMachine, transfers: []const Transfer) void {
+            assert(self.prefetch_context.idle());
+
             for (transfers) |*t| {
                 self.forest.grooves.transfers.prefetch_enqueue(t.id);
 
                 if (t.flags.post_pending_transfer or t.flags.void_pending_transfer) {
                     self.forest.grooves.transfers.prefetch_enqueue(t.pending_id);
-                }
-            }
 
-            self.forest.grooves.transfers.prefetch(
-                prefetch_create_transfers_callback_transfers,
-                self.prefetch_context.get(.transfers),
-            );
-        }
-
-        fn prefetch_create_transfers_callback_transfers(
-            completion: *TransfersGroove.PrefetchContext,
-        ) void {
-            const self: *StateMachine = PrefetchContext.parent(.transfers, completion);
-            self.prefetch_context = .null;
-
-            const transfers = mem.bytesAsSlice(Event(.create_transfers), self.prefetch_input.?);
-            for (transfers) |*t| {
-                if (t.flags.post_pending_transfer or t.flags.void_pending_transfer) {
-                    if (self.forest.grooves.transfers.get(t.pending_id)) |p| {
-                        // This prefetch isn't run yet, but enqueue it here as well to save an extra
-                        // iteration over transfers.
-                        self.forest.grooves.transfers_pending.prefetch_enqueue(p.timestamp);
-
-                        self.forest.grooves.accounts.prefetch_enqueue(p.debit_account_id);
-                        self.forest.grooves.accounts.prefetch_enqueue(p.credit_account_id);
+                    // If the posting/voiding transfer does not inform the account id, it must
+                    // be prefetched when we retrive the pending transfer.
+                    if (t.debit_account_id != 0) {
+                        self.forest.grooves.accounts.prefetch_enqueue(t.debit_account_id);
+                    }
+                    if (t.credit_account_id != 0) {
+                        self.forest.grooves.accounts.prefetch_enqueue(t.credit_account_id);
                     }
                 } else {
                     self.forest.grooves.accounts.prefetch_enqueue(t.debit_account_id);
@@ -809,34 +808,98 @@ pub fn StateMachineType(
                 }
             }
 
+            // Start two prefetches concurrently:
+
             self.forest.grooves.accounts.prefetch(
                 prefetch_create_transfers_callback_accounts,
                 self.prefetch_context.get(.accounts),
             );
+
+            self.forest.grooves.transfers.prefetch(
+                prefetch_create_transfers_callback_transfers,
+                self.prefetch_context.get(.transfers),
+            );
+        }
+
+        fn prefetch_create_transfers_callback_transfers(
+            completion: *TransfersGroove.PrefetchContext,
+        ) void {
+            const self: *StateMachine = PrefetchContext.complete(.transfers, completion);
+            maybe(self.prefetch_context.idle()); // Concurrent prefetch may be running.
+
+            const transfers = mem.bytesAsSlice(Event(.create_transfers), self.prefetch_input.?);
+            for (transfers) |*t| {
+                if (t.flags.post_pending_transfer or t.flags.void_pending_transfer) {
+                    if (self.forest.grooves.transfers.get(t.pending_id)) |p| {
+                        self.forest.grooves.transfers_pending.prefetch_enqueue(p.timestamp);
+                    }
+                }
+            }
+
+            if (self.forest.grooves.transfers_pending.prefetch_keys.count() > 0) {
+                self.forest.grooves.transfers_pending.prefetch(
+                    prefetch_create_transfers_callback_transfers_pending,
+                    self.prefetch_context.get(.transfers_pending),
+                );
+            } else if (self.prefetch_context.idle()) {
+                self.prefetch_finish();
+            }
         }
 
         fn prefetch_create_transfers_callback_accounts(
             completion: *AccountsGroove.PrefetchContext,
         ) void {
-            const self: *StateMachine = PrefetchContext.parent(.accounts, completion);
-            self.prefetch_context = .null;
+            const self: *StateMachine = PrefetchContext.complete(.accounts, completion);
+            maybe(self.prefetch_context.idle()); // Concurrent prefetch may be running.
 
-            self.forest.grooves.transfers_pending.prefetch(
-                prefetch_create_transfers_callback_transfers_pending,
-                self.prefetch_context.get(.transfers_pending),
-            );
+            // We need to call `prefetch_setup` again because we pretech accounts twice.
+            self.forest.grooves.accounts.prefetch_setup(null);
+
+            const transfers = mem.bytesAsSlice(Event(.create_transfers), self.prefetch_input.?);
+            for (transfers) |*t| {
+                if (t.flags.post_pending_transfer or t.flags.void_pending_transfer) {
+                    if (self.forest.grooves.transfers.get(t.pending_id)) |p| {
+                        if (t.debit_account_id == 0) {
+                            self.forest.grooves.accounts.prefetch_enqueue(p.debit_account_id);
+                        }
+                        if (t.credit_account_id == 0) {
+                            self.forest.grooves.accounts.prefetch_enqueue(p.credit_account_id);
+                        }
+                    }
+                }
+            }
+
+            if (self.forest.grooves.accounts.prefetch_keys.count() > 0) {
+                self.forest.grooves.accounts.prefetch(
+                    prefetch_create_transfers_callback_accounts_pending,
+                    self.prefetch_context.get(.accounts),
+                );
+            } else if (self.prefetch_context.idle()) {
+                self.prefetch_finish();
+            }
+        }
+
+        fn prefetch_create_transfers_callback_accounts_pending(
+            completion: *AccountsGroove.PrefetchContext,
+        ) void {
+            const self: *StateMachine = PrefetchContext.complete(.accounts, completion);
+            if (self.prefetch_context.idle()) {
+                self.prefetch_finish();
+            }
         }
 
         fn prefetch_create_transfers_callback_transfers_pending(
             completion: *TransfersPendingGroove.PrefetchContext,
         ) void {
-            const self: *StateMachine = PrefetchContext.parent(.transfers_pending, completion);
-            self.prefetch_context = .null;
-
-            self.prefetch_finish();
+            const self: *StateMachine = PrefetchContext.complete(.transfers_pending, completion);
+            if (self.prefetch_context.idle()) {
+                self.prefetch_finish();
+            }
         }
 
         fn prefetch_lookup_accounts(self: *StateMachine, ids: []const u128) void {
+            assert(self.prefetch_context.idle());
+
             for (ids) |id| {
                 self.forest.grooves.accounts.prefetch_enqueue(id);
             }
@@ -848,13 +911,14 @@ pub fn StateMachineType(
         }
 
         fn prefetch_lookup_accounts_callback(completion: *AccountsGroove.PrefetchContext) void {
-            const self: *StateMachine = PrefetchContext.parent(.accounts, completion);
-            self.prefetch_context = .null;
+            const self: *StateMachine = PrefetchContext.complete(.accounts, completion);
+            assert(self.prefetch_context.idle());
 
             self.prefetch_finish();
         }
 
         fn prefetch_lookup_transfers(self: *StateMachine, ids: []const u128) void {
+            assert(self.prefetch_context.idle());
             for (ids) |id| {
                 self.forest.grooves.transfers.prefetch_enqueue(id);
             }
@@ -866,8 +930,8 @@ pub fn StateMachineType(
         }
 
         fn prefetch_lookup_transfers_callback(completion: *TransfersGroove.PrefetchContext) void {
-            const self: *StateMachine = PrefetchContext.parent(.transfers, completion);
-            self.prefetch_context = .null;
+            const self: *StateMachine = PrefetchContext.complete(.transfers, completion);
+            assert(self.prefetch_context.idle());
 
             self.prefetch_finish();
         }
@@ -937,8 +1001,8 @@ pub fn StateMachineType(
         fn prefetch_get_account_balances_lookup_account_callback(
             completion: *AccountsGroove.PrefetchContext,
         ) void {
-            const self: *StateMachine = PrefetchContext.parent(.accounts, completion);
-            self.prefetch_context = .null;
+            const self: *StateMachine = PrefetchContext.complete(.accounts, completion);
+            assert(self.prefetch_context.idle());
 
             const filter = parse_filter_from_input(self.prefetch_input.?);
             self.prefetch_get_account_balances_scan(filter);
@@ -1333,6 +1397,7 @@ pub fn StateMachineType(
         }
 
         fn prefetch_expire_pending_transfers_accounts(self: *StateMachine) void {
+            assert(self.prefetch_context.idle());
             const transfers: []const Transfer = std.mem.bytesAsSlice(
                 Transfer,
                 self.scan_lookup_buffer[0 .. self.scan_lookup_result_count.? * @sizeOf(Transfer)],
@@ -1354,13 +1419,6 @@ pub fn StateMachineType(
                 prefetch_expire_pending_transfers_callback_accounts,
                 self.prefetch_context.get(.accounts),
             );
-        }
-
-        fn prefetch_expire_pending_transfers_callback_accounts(
-            completion: *AccountsGroove.PrefetchContext,
-        ) void {
-            const self: *StateMachine = PrefetchContext.parent(.accounts, completion);
-            self.prefetch_context = .null;
 
             self.forest.grooves.transfers_pending.prefetch(
                 prefetch_expire_pending_transfers_callback_transfers_pending,
@@ -1368,13 +1426,22 @@ pub fn StateMachineType(
             );
         }
 
+        fn prefetch_expire_pending_transfers_callback_accounts(
+            completion: *AccountsGroove.PrefetchContext,
+        ) void {
+            const self: *StateMachine = PrefetchContext.complete(.accounts, completion);
+            if (self.prefetch_context.idle()) {
+                self.prefetch_finish();
+            }
+        }
+
         fn prefetch_expire_pending_transfers_callback_transfers_pending(
             completion: *TransfersPendingGroove.PrefetchContext,
         ) void {
-            const self: *StateMachine = PrefetchContext.parent(.transfers_pending, completion);
-            self.prefetch_context = .null;
-
-            self.prefetch_finish();
+            const self: *StateMachine = PrefetchContext.complete(.transfers_pending, completion);
+            if (self.prefetch_context.idle()) {
+                self.prefetch_finish();
+            }
         }
 
         pub fn commit(
