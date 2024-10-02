@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
 const maybe = stdx.maybe;
@@ -72,11 +73,17 @@ pub fn StorageType(comptime IO: type) type {
             }
         };
 
+        pub const Fsync = struct {
+            completion: IO.Completion,
+            callback: *const fn (write: *Self.Fsync) void,
+        };
+
         pub const Write = struct {
             completion: IO.Completion,
             callback: *const fn (write: *Storage.Write) void,
             buffer: []const u8,
             offset: u64,
+            dsync: bool,
         };
 
         pub const NextTick = struct {
@@ -352,6 +359,7 @@ pub fn StorageType(comptime IO: type) type {
                 .callback = callback,
                 .buffer = buffer,
                 .offset = offset_in_storage,
+                .dsync = zone != .grid,
             };
 
             self.start_write(write);
@@ -371,6 +379,7 @@ pub fn StorageType(comptime IO: type) type {
                 self.fd,
                 write.buffer,
                 write.offset,
+                .{ .dsync = write.dsync },
             );
         }
 
@@ -419,6 +428,39 @@ pub fn StorageType(comptime IO: type) type {
             }
 
             self.start_write(write);
+        }
+
+        pub fn fsync_storage(
+            self: *Self,
+            callback: *const fn (fsync: *Self.Fsync) void,
+            fsync: *Self.Fsync,
+        ) void {
+            // Windows doesn't have fsync support yet - it runs with FILE_WRITE_THROUGH which is the
+            // same as O_DSYNC.
+            if (builtin.os.tag == .windows) {
+                return self.on_fsync(&fsync.completion, {});
+            }
+
+            fsync.* = .{
+                .completion = undefined,
+                .callback = callback,
+            };
+
+            self.io.fsync(
+                *Self,
+                self,
+                on_fsync,
+                &fsync.completion,
+                self.fd,
+            );
+        }
+
+        fn on_fsync(self: *Self, completion: *IO.Completion, result: IO.FsyncError!void) void {
+            _ = self;
+            _ = result catch @panic("fsync failure");
+
+            const fsync: *Self.Fsync = @fieldParentPtr("completion", completion);
+            fsync.callback(fsync);
         }
 
         /// Ensures that the read or write is within bounds and intends to read or write some bytes.

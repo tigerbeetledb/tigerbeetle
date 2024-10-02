@@ -51,6 +51,7 @@ pub fn GridType(comptime Storage: type) type {
 
         // Grid just reuses the Storage's NextTick abstraction for simplicity.
         pub const NextTick = Storage.NextTick;
+        pub const Fsync = Storage.Fsync;
 
         pub const Write = struct {
             callback: *const fn (*Grid.Write) void,
