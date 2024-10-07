@@ -44,11 +44,11 @@ public class Workload implements Callable<Void> {
         result.reconcile(model);
 
         switch (result) {
-          case CreateAccountsResult(var created, var failed) -> {
-            statistics.addRequests(created.size(), failed.size());
+          case CreateAccountsResult(var entries) -> {
+            recordResultEntries(entries);
           }
-          case CreateTransfersResult(var created, var failed) -> {
-            statistics.addRequests(created.size(), failed.size());
+          case CreateTransfersResult(var entries) -> {
+            recordResultEntries(entries);
           }
           default -> {
           }
@@ -64,6 +64,16 @@ public class Workload implements Callable<Void> {
               ledger, 
               command));
         throw e;
+      }
+    }
+  }
+
+  <T> void recordResultEntries(ArrayList<ResultEntry<T>> entries) {
+    for (var entry : entries) {
+      if (entry.successful()) {
+        statistics.addRequests(1, 0);
+      } else {
+        statistics.addRequests(0, 1);
       }
     }
   }

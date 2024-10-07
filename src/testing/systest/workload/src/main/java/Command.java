@@ -1,8 +1,10 @@
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.Optional;
 import java.util.stream.Collectors;
 import com.tigerbeetle.AccountBatch;
+import com.tigerbeetle.AccountFlags;
 import com.tigerbeetle.Client;
 import com.tigerbeetle.CreateAccountResultBatch;
 import com.tigerbeetle.IdBatch;
@@ -27,6 +29,8 @@ interface Command<CommandResult extends Result> {
 interface Result {
   void reconcile(Model model);
 }
+
+record ResultEntry<T>(boolean successful, T value) {}
 
 
 record NewAccount(long id, int ledger, int code, int flags) {
@@ -54,38 +58,48 @@ record CreateAccounts(ArrayList<NewAccount> accounts) implements Command<CreateA
       createAccountFailedIndices.set(index);
     }
 
-    // We partition the results into created and failed.
-    var created = new ArrayList<NewAccount>();
-    var failed = new ArrayList<NewAccount>();
+    var entries = new ArrayList<ResultEntry<NewAccount>>();
 
     int i = 0;
     for (NewAccount account : accounts) {
-      if (createAccountFailedIndices.get(i)) {
-        failed.add(account);
-      } else {
-        created.add(account);
-      }
+      entries.add(new ResultEntry<>(!createAccountFailedIndices.get(i), account));
       i++;
     }
 
-    return new CreateAccountsResult(created, failed);
+    return new CreateAccountsResult(entries);
   }
 }
 
 
-record CreateAccountsResult(ArrayList<NewAccount> created, ArrayList<NewAccount> failed)
+record CreateAccountsResult(ArrayList<ResultEntry<NewAccount>> entries)
     implements Result {
 
   @Override
   public void reconcile(Model model) {
-    for (var newAccount : created) {
-      assert !model.accounts.containsKey(newAccount.id());
+    Optional<ResultEntry<NewAccount>> previousEntry = Optional.empty();
+
+    for (var current : entries) {
+      var newAccount = current.value();
+
+      // Check that linked accounts succeed or fail together.
+      previousEntry.ifPresent(previous -> {
+        if (AccountFlags.hasLinked(previous.value().flags())) {
+          assert previous.successful() == current.successful()
+            : "linked accounts have different results";
+        }
+      });
+      previousEntry = Optional.of(current);
+
       assert newAccount.ledger() == model.ledger;
 
-      var account = new CreatedAccount(newAccount.id(), newAccount.ledger(), newAccount.code(),
-          newAccount.flags());
+      if (current.successful()) {
+        assert !model.accounts.containsKey(newAccount.id());
 
-      model.accounts.put(account.id(), account);
+        var account = new CreatedAccount(newAccount.id(), newAccount.ledger(), newAccount.code(),
+            newAccount.flags());
+
+        model.accounts.put(account.id(), account);
+      }
     }
   }
 
@@ -121,31 +135,44 @@ record CreateTransfers(ArrayList<NewTransfer> transfers) implements Command<Crea
       transferFailedIndices.set(index);
     }
 
-    // We partition the results into created and failed.
-    var created = new ArrayList<NewTransfer>();
-    var failed = new ArrayList<NewTransfer>();
+    var entries = new ArrayList<ResultEntry<NewTransfer>>();
 
     int i = 0;
     for (NewTransfer transfer : this.transfers) {
-      if (transferFailedIndices.get(i)) {
-        failed.add(transfer);
-      } else {
-        created.add(transfer);
-      }
+      var successful = !transferFailedIndices.get(i);
+      entries.add(new ResultEntry<>(successful, transfer));
       i++;
     }
 
-    return new CreateTransfersResult(created, failed);
+    return new CreateTransfersResult(entries);
   }
 }
 
 
-record CreateTransfersResult(ArrayList<NewTransfer> created, ArrayList<NewTransfer> failed)
+record CreateTransfersResult(ArrayList<ResultEntry<NewTransfer>> entries)
     implements Result {
 
   @Override
   public void reconcile(Model model) {
-    for (var transfer : created) {
+    Optional<ResultEntry<NewTransfer>> previousEntry = Optional.empty();
+
+    for (var current : entries) {
+      var transfer = current.value();
+
+      // Check that linked transfers succeed or fail together.
+      previousEntry.ifPresent(previous -> {
+        if (TransferFlags.hasLinked(previous.value().flags())) {
+          assert previous.successful() == current.successful()
+            : "linked transfers have different results";
+        }
+      });
+      previousEntry = Optional.of(current);
+
+      // No further validation needed for failed tranfers.
+      if (!current.successful()) {
+        continue;
+      }
+
       if (TransferFlags.hasPending(transfer.flags())) {
         assert model.pendingTransfers.add(transfer.id()) 
           : "pending transfers already contained %d".formatted(transfer.id());
@@ -153,7 +180,7 @@ record CreateTransfersResult(ArrayList<NewTransfer> created, ArrayList<NewTransf
       if (TransferFlags.hasVoidPendingTransfer(transfer.flags()) 
           || TransferFlags.hasPostPendingTransfer(transfer.flags())) {
         assert model.pendingTransfers.remove(transfer.pendingId())
-          : "pending transfers did not already contain %d".formatted(transfer.id());
+          : "pending transfers did not contain %d".formatted(transfer.id());
       } else {
         var debitAccount = model.accounts.get(transfer.debitAccountId());
         var creditAccount = model.accounts.get(transfer.creditAccountId());
