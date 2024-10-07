@@ -7,6 +7,7 @@ import com.tigerbeetle.Client;
 import com.tigerbeetle.CreateAccountResultBatch;
 import com.tigerbeetle.IdBatch;
 import com.tigerbeetle.TransferBatch;
+import com.tigerbeetle.TransferFlags;
 import com.tigerbeetle.UInt128;
 
 /**
@@ -92,7 +93,7 @@ record CreateAccountsResult(ArrayList<NewAccount> created, ArrayList<NewAccount>
 
 
 record NewTransfer(long id, long debitAccountId, long creditAccountId, int ledger, int code,
-    BigInteger amount, int flags) {
+    BigInteger amount, long pendingId, int flags) {
 }
 
 
@@ -145,11 +146,21 @@ record CreateTransfersResult(ArrayList<NewTransfer> created, ArrayList<NewTransf
   @Override
   public void reconcile(Model model) {
     for (var transfer : created) {
-      var debitAccount = model.accounts.get(transfer.debitAccountId());
-      var creditAccount = model.accounts.get(transfer.creditAccountId());
-      assert debitAccount != null;
-      assert creditAccount != null;
-      assert debitAccount.ledger() == creditAccount.ledger();
+      if (TransferFlags.hasPending(transfer.flags())) {
+        assert model.pendingTransfers.add(transfer.id()) 
+          : "pending transfers already contained %d".formatted(transfer.id());
+      }
+      if (TransferFlags.hasVoidPendingTransfer(transfer.flags()) 
+          || TransferFlags.hasPostPendingTransfer(transfer.flags())) {
+        assert model.pendingTransfers.remove(transfer.pendingId())
+          : "pending transfers did not already contain %d".formatted(transfer.id());
+      } else {
+        var debitAccount = model.accounts.get(transfer.debitAccountId());
+        var creditAccount = model.accounts.get(transfer.creditAccountId());
+        assert debitAccount != null;
+        assert creditAccount != null;
+        assert debitAccount.ledger() == creditAccount.ledger();
+      }
     }
   }
 }

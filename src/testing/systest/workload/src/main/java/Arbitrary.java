@@ -2,7 +2,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.function.Supplier;
@@ -14,8 +13,9 @@ public class Arbitrary {
   /**
    * Selects a random value in {@code elements}.
    */
-  static <T> T element(Random random, List<T> elements) {
-    return elements.get(random.nextInt(0, elements.size()));
+  static <T> T element(Random random, Collection<T> elements) {
+    var list = new ArrayList<>(elements);
+    return list.get(random.nextInt(0, list.size()));
   }
 
   /**

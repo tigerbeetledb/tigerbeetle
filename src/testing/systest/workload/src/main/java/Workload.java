@@ -19,7 +19,7 @@ import com.tigerbeetle.TransferFlags;
  */
 public class Workload implements Callable<Void> {
   static int ACCOUNTS_COUNT_MAX = 100;
-  static int BATCH_SIZE_MAX = 1000;
+  static int BATCH_SIZE_MAX = 8190;
 
   final Model model;
   final Random random;
@@ -37,7 +37,7 @@ public class Workload implements Callable<Void> {
 
   @Override
   public Void call() {
-    for (int n = 0; true; n++) {
+    while (true) {
       var command = randomCommand();
       try {
         var result = command.execute(client);
@@ -90,6 +90,8 @@ public class Workload implements Callable<Void> {
   }
 
   Optional<Supplier<? extends Command<?>>> createAccounts() {
+    // Note: IMPORTED accounts are not yet generated.
+
     int accountsCreatedCount = model.accounts.size();
 
     if (accountsCreatedCount < ACCOUNTS_COUNT_MAX) {
@@ -105,9 +107,11 @@ public class Workload implements Callable<Void> {
               List.of(AccountFlags.LINKED,
                   AccountFlags.DEBITS_MUST_NOT_EXCEED_CREDITS,
                   AccountFlags.CREDITS_MUST_NOT_EXCEED_DEBITS, 
-                  AccountFlags.HISTORY,
-                  AccountFlags.IMPORTED, 
-                  AccountFlags.CLOSED));
+                  AccountFlags.HISTORY));
+          
+          if (random.nextDouble(1.0) > 0.99) {
+            flags |= AccountFlags.CLOSED;
+          }
           newAccounts.add(new NewAccount(id, ledger, code, flags));
         }
 
@@ -120,6 +124,8 @@ public class Workload implements Callable<Void> {
   }
 
   Optional<Supplier<? extends Command<?>>> createTransfers() {
+    // Note: IMPORTED transfers are not yet generated.
+
     var accounts = model.allAccounts();
 
     // We can only transfer when there are at least two accounts.
@@ -132,20 +138,31 @@ public class Workload implements Callable<Void> {
       var newTransfers = new ArrayList<NewTransfer>(transfersCount);
 
       for (int i = 0; i < transfersCount; i++) {
-        var id = random.nextLong(0, Long.MAX_VALUE);
+        var id = random.nextLong(1, Long.MAX_VALUE);
         var code = random.nextInt(1, 100);
         var amount = BigInteger.valueOf(random.nextLong(0, Long.MAX_VALUE));
-        var flags = Arbitrary.flags(random,
-            List.of(
-              TransferFlags.LINKED, 
-              TransferFlags.PENDING,
-              TransferFlags.POST_PENDING_TRANSFER, 
-              TransferFlags.VOID_PENDING_TRANSFER,
-              TransferFlags.BALANCING_DEBIT, 
-              TransferFlags.BALANCING_CREDIT,
-              TransferFlags.CLOSING_DEBIT, 
-              TransferFlags.CLOSING_CREDIT,
-              TransferFlags.IMPORTED));
+        long pendingId = 0;
+        var flags = TransferFlags.NONE;
+
+        if (random.nextDouble(1.0) > 0.9 && !model.pendingTransfers.isEmpty()) {
+          flags = Arbitrary.element(random, List.of(
+                TransferFlags.POST_PENDING_TRANSFER, 
+                TransferFlags.VOID_PENDING_TRANSFER));
+        } else if (random.nextDouble(1.0) > 0.99999) {
+          flags = Arbitrary.flags(random, List.of(
+                TransferFlags.CLOSING_DEBIT, 
+                TransferFlags.CLOSING_CREDIT)) | TransferFlags.PENDING;
+        } else {
+          flags = Arbitrary.flags(random, List.of(
+                TransferFlags.PENDING,
+                TransferFlags.BALANCING_DEBIT, 
+                TransferFlags.BALANCING_CREDIT));
+        }
+
+        // The last transfer in a batch can't be linked.
+        if (i < (transfersCount - 1) && random.nextDouble(1.0) > 0.9) {
+          flags |= TransferFlags.LINKED;
+        }
 
         int debitAccountIndex = random.nextInt(0, accounts.size());
         int creditAccountIndex = random.ints(0, accounts.size())
@@ -153,8 +170,15 @@ public class Workload implements Callable<Void> {
         var debitAccountId = accounts.get(debitAccountIndex).id();
         var creditAccountId = accounts.get(creditAccountIndex).id();
 
+        if (TransferFlags.hasPostPendingTransfer(flags) || TransferFlags.hasVoidPendingTransfer(flags)) {
+          pendingId = Arbitrary.element(random, model.pendingTransfers);
+          code = 0;
+          debitAccountId = 0;
+          creditAccountId = 0;
+        }
+
         newTransfers.add(
-            new NewTransfer(id, debitAccountId, creditAccountId, ledger, code, amount, flags));
+            new NewTransfer(id, debitAccountId, creditAccountId, ledger, code, amount, pendingId, flags));
       }
 
       return new CreateTransfers(newTransfers);
@@ -175,3 +199,4 @@ public class Workload implements Callable<Void> {
     return Optional.empty();
   }
 }
+

@@ -1,6 +1,7 @@
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 
 /**
  * Tracks information about the accounts created by test (e.g. their ids). The model should only be
@@ -11,6 +12,7 @@ public class Model {
    * Accounts by id.
    */
   HashMap<Long, CreatedAccount> accounts = new HashMap<>();
+  public HashSet<Long> pendingTransfers = new HashSet<>();
   public final int ledger;
 
   public Model(int ledger) {
