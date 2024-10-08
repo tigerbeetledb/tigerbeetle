@@ -7,6 +7,8 @@ import java.util.concurrent.Callable;
 import java.util.function.Supplier;
 import com.tigerbeetle.AccountFlags;
 import com.tigerbeetle.Client;
+import com.tigerbeetle.CreateAccountResult;
+import com.tigerbeetle.CreateTransferResult;
 import com.tigerbeetle.TransferFlags;
 
 /**
@@ -19,13 +21,16 @@ import com.tigerbeetle.TransferFlags;
  */
 public class Workload implements Callable<Void> {
   static int ACCOUNTS_COUNT_MAX = 100;
-  static int BATCH_SIZE_MAX = 8190;
+  static int BATCH_SIZE_MAX = 10;
 
   final Model model;
   final Random random;
   final Client client;
   final int ledger;
   final Statistics statistics;
+
+  Optional<Command> previousCommand = Optional.empty();
+  Optional<Result> previousResult = Optional.empty();
 
   public Workload(Random random, Client client, int ledger, Statistics statistics) {
     this.random = random;
@@ -37,40 +42,60 @@ public class Workload implements Callable<Void> {
 
   @Override
   public Void call() {
+
     while (true) {
       var command = randomCommand();
+      Result result = null;
       try {
-        var result = command.execute(client);
+        result = command.execute(client);
         result.reconcile(model);
-
-        switch (result) {
-          case CreateAccountsResult(var entries) -> {
-            recordResultEntries(entries);
-          }
-          case CreateTransfersResult(var entries) -> {
-            recordResultEntries(entries);
-          }
-          default -> {
-          }
-        }
+        recordResult(result);
 
         lookupAllAccounts().ifPresent(query -> {
           var response = (LookupAccountsResult) query.execute(client);
           statistics.addRequests(response.accountsFound().size(), 0);
           response.reconcile(model);
         });
+
+        previousCommand = Optional.of(command);
+        previousResult = Optional.of(result);
+
       } catch (AssertionError e) {
-        System.err.println("ledger %d: Assertion failed after executing command: %s".formatted(
-              ledger, 
-              command));
+        var builder = new StringBuilder();
+
+        builder.append("ledger ").append(ledger).append(", command:\n");
+        command.render(builder, true, "  ");
+
+        builder.append("ledger ").append(ledger).append(", result:\n");
+        result.render(builder, true, "  ");
+
+        System.err.print(builder.toString());
+
         throw e;
       }
     }
   }
 
-  <T> void recordResultEntries(ArrayList<ResultEntry<T>> entries) {
+
+
+  void recordResult(Result result) {
+    switch (result) {
+      case CreateAccountsResult(var entries) -> {
+        recordResultEntries(entries, CreateAccountResult.Ok);
+      }
+      case CreateTransfersResult(var entries) -> {
+        recordResultEntries(entries, CreateTransferResult.Ok);
+      }
+      case RetryResult(var originalResult, var retryResult) -> {
+        recordResult(retryResult);
+      }
+      default -> {}
+    }
+  }
+
+  <E, T extends Renderable> void recordResultEntries(ArrayList<ResultEntry<E, T>> entries, E okResult) {
     for (var entry : entries) {
-      if (entry.successful()) {
+      if (entry.result() == okResult) {
         statistics.addRequests(1, 0);
       } else {
         statistics.addRequests(0, 1);
@@ -78,14 +103,17 @@ public class Workload implements Callable<Void> {
     }
   }
 
-  Command<?> randomCommand() {
+  Command randomCommand() {
     // Commands are `Supplier`s of values. They are intially wrapped in `Optional`, to represent if
     // they are enabled. Further, they are wrapped in `WithOdds`, increasing the likelyhood of
     // certain commands being chosen.
-    var commandsAll = List.of(WithOdds.of(1, createAccounts()), WithOdds.of(5, createTransfers()));
+    var commandsAll = List.of(
+        WithOdds.of(10, createAccounts()), 
+        WithOdds.of(50, createTransfers()),
+        WithOdds.of(1, createRetry()));
 
     // Here we select all commands that are currently enabled.
-    var commandsEnabled = new ArrayList<WithOdds<Supplier<? extends Command<?>>>>();
+    var commandsEnabled = new ArrayList<WithOdds<Supplier<? extends Command>>>();
     for (var command : commandsAll) {
       command.value().ifPresent(supplier -> {
         commandsEnabled.add(WithOdds.of(command.odds(), supplier));
@@ -93,13 +121,13 @@ public class Workload implements Callable<Void> {
     }
 
     // There should always be at least one enabled command.
-    assert !commandsEnabled.isEmpty() : "no commands are enabled";
+    Assert.that(!commandsEnabled.isEmpty(), "no commands are enabled");
 
     // Select and realize a single command based on the odds.
     return Arbitrary.odds(random, commandsEnabled).get();
   }
 
-  Optional<Supplier<? extends Command<?>>> createAccounts() {
+  Optional<Supplier<? extends Command>> createAccounts() {
     // Note: IMPORTED accounts are not yet generated.
 
     int accountsCreatedCount = model.accounts.size();
@@ -133,7 +161,7 @@ public class Workload implements Callable<Void> {
 
   }
 
-  Optional<Supplier<? extends Command<?>>> createTransfers() {
+  Optional<Supplier<? extends Command>> createTransfers() {
     // Note: IMPORTED transfers are not yet generated.
 
     var accounts = model.allAccounts();
@@ -193,6 +221,16 @@ public class Workload implements Callable<Void> {
 
       return new CreateTransfers(newTransfers);
     });
+  }
+
+  Optional<Supplier<? extends Command>> createRetry() {
+    return previousCommand.flatMap(command ->
+      previousResult.flatMap(originalResult -> 
+        command instanceof RetryCommand
+          ? Optional.empty()
+          : Optional.of(() -> new RetryCommand(command, originalResult))
+      )
+    );
   }
 
   Optional<LookupAccounts> lookupAllAccounts() {

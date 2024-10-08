@@ -13,7 +13,7 @@ class Statistics {
     this.failed = 0;
   }
 
-  public synchronized long requestsPerSecond() {
+  public synchronized long eventsPerSecond() {
     long nowMs = System.currentTimeMillis();
     long elapsedSeconds = (nowMs - startTimeMs) / 1000;
     return (successful / elapsedSeconds) + (failed / elapsedSeconds);

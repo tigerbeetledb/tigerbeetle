@@ -3,6 +3,7 @@ import java.text.NumberFormat;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.Executors;
@@ -27,7 +28,9 @@ public final class Main {
           "REPLICAS must list at least one address (comma-separated)");
     }
 
-    Random random = new SecureRandom();
+    Optional<Integer> seed = Optional.ofNullable(env.get("SEED")).map(Integer::parseInt);
+    Random random = seed.map(Random::new).orElse(new SecureRandom());
+
     byte[] clusterID = UInt128.asBytes(Long.parseLong(env.getOrDefault("CLUSTER", "1")));
 
     try (var client = new Client(clusterID, replicaAddresses)) {
@@ -50,6 +53,12 @@ public final class Main {
           var result = completionService.take();
           result.get();
         }
+      } catch (Throwable e) {
+        System.err.println("Test failed: " + e.toString());
+        e.printStackTrace();
+        seed.ifPresent(n -> {
+          System.err.println("Seed: " + n.toString());
+        });
       } finally {
         executor.shutdownNow();
       }
@@ -62,19 +71,19 @@ public final class Main {
       try {
         Thread.sleep(Duration.ofSeconds(10));
 
-        var requestsSuccessful = statistics.successful();
-        var requestsFailed = statistics.failed();
-        var requestsTotal = requestsSuccessful + requestsFailed;
-        var requestsPerSecond = statistics.requestsPerSecond();
-        var requestSuccessRate = requestsTotal > 0 
-          ? ((double) requestsSuccessful / requestsTotal) 
+        var eventsSuccessful = statistics.successful();
+        var eventsFailed = statistics.failed();
+        var eventsTotal = eventsSuccessful + eventsFailed;
+        var eventsPerSecond = statistics.eventsPerSecond();
+        var eventSuccessRate = eventsTotal > 0 
+          ? ((double) eventsSuccessful / eventsTotal) 
           : 0.0;
 
         System.err.println(
-            "%d requests in total, %s successful, throughput of %d req/s".formatted(
-              requestsTotal,
-              NumberFormat.getPercentInstance().format(requestSuccessRate),
-              requestsPerSecond));
+            "%d events in total, %s successful, throughput of %d events/sec".formatted(
+              eventsTotal,
+              NumberFormat.getPercentInstance().format(eventSuccessRate),
+              eventsPerSecond));
       } catch (InterruptedException e) {
         break;
       }
