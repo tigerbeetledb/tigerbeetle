@@ -789,6 +789,8 @@ pub fn exponential_backoff_with_jitter(
     max: u64,
     attempt: u64,
 ) u64 {
+    if (attempt == 0) return 0;
+
     const range = max - min;
     assert(range > 0);
 
@@ -831,6 +833,8 @@ test "exponential_backoff_with_jitter" {
         try std.testing.expect(ebwj >= min);
         try std.testing.expect(ebwj <= max);
     }
+
+    assert(exponential_backoff_with_jitter(random, min, max, 0) == 0);
 }
 
 /// Returns An array containing the remote or local addresses of each of the 2f + 1 replicas:
