@@ -70,7 +70,12 @@ fn MessageBusType(comptime process_type: vsr.ProcessType) type {
                 /// is established.
                 clients: std.AutoHashMapUnmanaged(u128, *Connection) = .{},
             },
-            .client => void,
+            .client => struct {
+                id: u128,
+
+                /// Only tests should ever override the release.
+                release: vsr.Release = constants.config.process.release,
+            },
         },
 
         /// The callback to be called when a message is received.
@@ -148,7 +153,9 @@ fn MessageBusType(comptime process_type: vsr.ProcessType) type {
                         .accept_address = tcp.address,
                     };
                 },
-                .client => {},
+                .client => .{
+                    .id = process_id.client,
+                },
             };
 
             var bus: MessageBus = .{
@@ -412,6 +419,7 @@ fn MessageBusType(comptime process_type: vsr.ProcessType) type {
             if (bus.replicas[replica]) |connection| {
                 connection.send_message(bus, message);
             } else {
+                // FIXME: Remove this and queue the message rather.
                 log.debug("no active connection to replica {}, " ++
                     "dropping message with header {}", .{ replica, message.header });
             }
@@ -603,10 +611,39 @@ fn MessageBusType(comptime process_type: vsr.ProcessType) type {
                 bus.replicas_connect_attempts[connection.peer.replica] = 0;
 
                 connection.assert_recv_send_initial_state(bus);
+                if (process_type == .client) {
+                    connection.send_initial_ping_client(bus);
+                }
                 connection.get_recv_message_and_recv(bus);
-                // A message may have been queued for sending while we were connecting:
-                // TODO Should we relax recv() and send() to return if `state != .connected`?
-                if (connection.state == .connected) connection.send(bus);
+                // // A message may have been queued for sending while we were connecting:
+                // // TODO Should we relax recv() and send() to return if `state != .connected`?
+                // if (connection.state == .connected) connection.send(bus);
+            }
+
+            pub fn send_initial_ping_client(connection: *Connection, bus: *MessageBus) void {
+                assert(process_type == .client);
+                assert(connection.peer == .replica);
+                connection.assert_recv_send_initial_state(bus);
+
+                const ping = Header.PingClient{
+                    .command = .ping_client,
+                    .cluster = bus.cluster,
+                    .release = bus.process.release,
+                    .client = bus.process.id,
+                };
+                const header = ping.frame_const().*;
+                assert(header.size == @sizeOf(Header));
+
+                const message = bus.get_message(null);
+                defer bus.unref(message);
+
+                message.header.* = header;
+                message.header.set_checksum_body(message.body_used());
+                message.header.set_checksum();
+                std.log.info("sizeg:{}", .{@sizeOf(Header)});
+                std.log.info("size:{}", .{message.header.size});
+
+                connection.send_message(bus, message);
             }
 
             /// Given a newly accepted fd, start receiving messages on it.
@@ -1004,6 +1041,8 @@ fn MessageBusType(comptime process_type: vsr.ProcessType) type {
                 assert(connection.state == .connected);
                 assert(connection.fd != IO.INVALID_SOCKET);
                 const message = connection.send_queue.head() orelse return;
+                if (process_type == .client)
+                    std.log.info("SENDING: {}", .{message.header});
                 assert(!connection.send_submitted);
                 connection.send_submitted = true;
                 bus.io.send(

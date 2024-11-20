@@ -689,7 +689,7 @@ pub const Timeout = struct {
         self.ticks = 0;
         self.attempts +%= 1;
 
-        log.debug("{}: {s} backing off", .{ self.id, self.name });
+        // log.debug("{}: {s} backing off", .{ self.id, self.name });
         self.set_after_for_rtt_and_attempts(random);
     }
 
@@ -697,7 +697,7 @@ pub const Timeout = struct {
     /// otherwise further ticks around the event loop may trigger a thundering herd of messages.
     pub fn fired(self: *const Timeout) bool {
         if (self.ticking and self.ticks >= self.after) {
-            log.debug("{}: {s} fired", .{ self.id, self.name });
+            // log.debug("{}: {s} fired", .{ self.id, self.name });
             if (self.ticks > self.after) {
                 log.err("{}: {s} is firing every tick", .{ self.id, self.name });
                 @panic("timeout was not reset correctly");
@@ -713,7 +713,7 @@ pub const Timeout = struct {
         self.ticks = 0;
         assert(self.ticking);
         // TODO Use self.prng to adjust for rtt and attempts.
-        log.debug("{}: {s} reset", .{ self.id, self.name });
+        // log.debug("{}: {s} reset", .{ self.id, self.name });
     }
 
     /// Sets the value of `after` as a function of `rtt` and `attempts`.

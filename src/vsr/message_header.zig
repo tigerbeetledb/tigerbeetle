@@ -198,13 +198,7 @@ pub const Header = extern struct {
         switch (self.into_any()) {
             .reserved => unreachable,
             // These messages cannot always identify the peer as they may be forwarded:
-            .request => |request| {
-                switch (request.operation) {
-                    // However, we do not forward the first .register request sent by a client:
-                    .register => return .{ .client = request.client },
-                    else => return .unknown,
-                }
-            },
+            .request => return .unknown,
             .prepare => return .unknown,
             .block => return .unknown,
             .reply => return .unknown,

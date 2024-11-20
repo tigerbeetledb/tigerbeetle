@@ -1141,7 +1141,7 @@ pub fn ReplicaType(
                 .ping_timeout = Timeout{
                     .name = "ping_timeout",
                     .id = replica_index,
-                    .after = 100,
+                    .after = 1000,
                 },
                 .prepare_timeout = Timeout{
                     .name = "prepare_timeout",
@@ -5568,11 +5568,7 @@ pub fn ReplicaType(
                 return false;
             }
 
-            if (message.header.operation == .register) {
-                // We do not forward `.register` requests for the sake of `Header.peer_type()`.
-                // This enables the MessageBus to identify client connections on the first message.
-                log.debug("{}: on_request: ignoring (backup, register)", .{self.replica});
-            } else if (message.header.view < self.view) {
+            if (message.header.view < self.view) {
                 // The client may not know who the primary is, or may be retrying after a primary
                 // failure. We forward to the new primary ahead of any client retry timeout to
                 // reduce latency. Since the client is already connected to all replicas, the client
