@@ -11,7 +11,7 @@ const Message = @import("../message_pool.zig").MessagePool.Message;
 const log = std.log.scoped(.aof);
 
 // Arbitrary value.
-const backing_size = 32 * 1024 * 1024;
+const backing_size = 384 * 1024 * 1024;
 
 const InMemoryAOF = struct {
     backing_store: []align(constants.sector_size) u8,
