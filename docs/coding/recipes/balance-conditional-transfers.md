@@ -1,7 +1,3 @@
----
-sidebar_position: 4
----
-
 # Balance-Conditional Transfers
 
 In some use cases, you may want to execute a transfer if and only if an account has at least a

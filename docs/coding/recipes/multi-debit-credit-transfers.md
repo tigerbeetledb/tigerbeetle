@@ -1,7 +1,3 @@
----
-sidebar_position: 2
----
-
 # Multi-Debit, Multi-Credit Transfers
 
 TigerBeetle is designed for maximum performance. In order to keep it lean, the database only

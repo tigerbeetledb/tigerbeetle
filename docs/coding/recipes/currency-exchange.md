@@ -1,7 +1,3 @@
----
-sidebar_position: 1
----
-
 # Currency Exchange
 
 Some applications require multiple currencies. For example, a bank may hold balances in many

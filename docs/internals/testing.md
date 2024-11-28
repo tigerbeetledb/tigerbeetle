@@ -1,7 +1,3 @@
----
-sidebar_position: 5
----
-
 # Testing
 
 Documentation for (roughly) code in the `src/testing` directory.

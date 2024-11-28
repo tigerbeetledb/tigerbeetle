@@ -1,7 +1,3 @@
----
-sidebar_position: 4
----
-
 # Deterministic Simulation Testing
 
 Deterministic Simulation Testing (DST) is one of our favorite parts about TigerBeetle, and it is a

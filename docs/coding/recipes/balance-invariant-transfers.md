@@ -1,7 +1,3 @@
----
-sidebar_position: 8
----
-
 # Balance-invariant Transfers
 
 For some accounts, it may be useful to enforce

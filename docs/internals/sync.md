@@ -1,7 +1,3 @@
----
-sidebar_position: 4
----
-
 # State Sync
 
 State sync synchronizes the state of a lagging replica with the healthy cluster.

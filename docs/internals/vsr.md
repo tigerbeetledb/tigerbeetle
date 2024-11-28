@@ -1,7 +1,3 @@
----
-sidebar_position: 1
----
-
 # VSR
 
 Documentation for (roughly) code in the `src/vsr` directory.
