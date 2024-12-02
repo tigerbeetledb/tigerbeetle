@@ -1,7 +1,3 @@
----
-sidebar_position: 7
----
-
 # Rate Limiting
 
 TigerBeetle can be used to account for non-financial resources.

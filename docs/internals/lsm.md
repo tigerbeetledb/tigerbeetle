@@ -1,7 +1,3 @@
----
-sidebar_position: 3
----
-
 # LSM
 
 Documentation for (roughly) code in the `src/lsm` directory.

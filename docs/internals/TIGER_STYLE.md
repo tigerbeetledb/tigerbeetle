@@ -1,7 +1,3 @@
----
-sidebar_position: 6
----
-
 # Tiger Style
 
 ## The Essence Of Style

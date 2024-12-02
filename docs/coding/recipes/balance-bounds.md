@@ -1,7 +1,3 @@
----
-sidebar_position: 5
----
-
 # Balance Bounds
 
 It is easy to limit an account's balance using either

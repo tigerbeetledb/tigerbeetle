@@ -1,7 +1,3 @@
----
-sidebar_position: 4
----
-
 # `AccountFilter`
 
 An `AccountFilter` is a record containing the filter parameters for querying
