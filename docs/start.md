@@ -165,10 +165,17 @@ TigerBeetle cluster, and run transactions through it. Here's where to go from he
 
 ## Community
 
-TODO: motivate&why these all!
+If you want to keep up to speed with recent TigerBeetle developments, here are some things to
+follow:
 
-- [𝕏](https://twitter.com/tigerbeetledb)
-- [GitHub](https://github.com/tigerbeetle/tigerbeetle)
-- [Slack](https://slack.tigerbeetle.com/invite)
-- [Monthly Newsletter](https://mailchi.mp/8e9fa0f36056/subscribe-to-tigerbeetle)
-- [YouTube](https://www.youtube.com/@tigerbeetledb)
+- [Monthly Newsletter](https://mailchi.mp/8e9fa0f36056/subscribe-to-tigerbeetle) covers everything
+  of importance that happened with TigerBeetle. It is a changelog director's cut!
+- [Slack](https://slack.tigerbeetle.com/invite) is the place to hang out with users and developers
+  of TigerBeetle. We try to answer every question.
+- [YouTube](https://www.youtube.com/@tigerbeetledb) channel has most of the talks about TigerBeetle,
+  talks from the Systems Distributed conference. We also stream on
+  [Twitch](https://www.twitch.tv/tigerbeetle), with recordings duplicated to YouTube.
+- [𝕏](https://twitter.com/TigerBeetleDB) is good for smaller updates, and word-of-mouth historical
+  trivia you won't learn elsewhere!
+- [GitHub](https://github.com/tigerbeetle/tigerbeetle) --- let's mention it here for completeness,
+  but you probably know this one!

@@ -1,7 +1,7 @@
 # TigerBeetle
 
 This is the documentation for TigerBeetle: the financial transactions database designed for mission
-critical safety and performance to power the next 30 years of [OLTP](https://docs.tigerbeetle.com/concepts/oltp).
+critical safety and performance to power the next 30 years of [OLTP](./concepts/oltp.md).
 
 Begin at the [Start](./start.md) and be sure to read the [Concepts](./concepts/) section, which
 explains the big ideas behind TigerBeetle.
