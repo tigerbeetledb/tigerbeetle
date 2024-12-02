@@ -6,7 +6,7 @@ a series of loosely connected guides which can be read in any order.
 - [System Architecture](./system-architecture.md) paints the big picture.
 - [Data Modeling](./data-modeling.md) shows how to map business-level entities to the primitives
   provided by TigerBeetle
-- [Reliable Transfer Submission](./idempotency.md) explains the end-to-end principle and how it
+- [Reliable Transfer Submission](./reliable-transaction-submission.md) explains the end-to-end principle and how it
   helps to avoid double spending.
 - [Time](./time.md) lists the guarantees provided by TigerBeetle cluster clock.
 - [Two-Phase Transfers](./two-phase-transfers.md) introduces pending transfer, one of the most
