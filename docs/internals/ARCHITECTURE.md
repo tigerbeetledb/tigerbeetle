@@ -96,7 +96,7 @@ Here's a mental model for TigerBeetle: a good way to solve financial transaction
 hash map that stores accounts keyed by their IDs. Processing a transfer is then two hash-map
 lookups, a balance check, and two balance updates. This is the "speed-of-light" for the problem ---
 any other solution wouldn't be significantly faster. The question now becomes, how close can you get
-to that theoretical performance, if you also add persistance (to not loose data on restarts) and
+to that theoretical performance, if you also add persistence (to not loose data on restarts) and
 high-availability (to continue to function if one machine crashes).
 
 ### Single Thread
@@ -107,14 +107,14 @@ The primarily negative reason is that the underlying workload is inherently cont
 accounts are just way more popular than owners, and transfers between hot accounts inherently
 sequentialize the system. Trying to make transactions parallel not only doesn't make it faster, in
 fact, the overhead of synchronization tends to dominate useful work. Formally, our claim is that
-financial tranasaction processing is an infinite-COST problem, using the terminology from Frank
+financial transaction processing is an infinite-COST problem, using the terminology from Frank
 McSherry's paper.
 
 The positive reason for using a single thread is that CPUs are quite fast actually, and the reports
 of Moor's Law demise are somewhat overstated. A single core can easily to 1mil TPS if:
 
 - you keep that core busy with the useful work and move everything else off the hot path,
-- you use the core efficiently and do your home work with cacheline aligned data structures, memory
+- you use the core efficiently and do your home work with cache line aligned data structures, memory
   prefetching, SIMD and other boring performance engineering 101.
 
 Additionally, keeping the system single threaded greatly simplifies the programming model, making
@@ -146,7 +146,7 @@ information.
 Knowing the limits is useful, because it ensures that the system continues to function correctly
 even when overloaded. For example, TigerBeetle doesn't need to have _explicit_ code for handling
 backpressure --- if everything has a limit, there's nothing to grow without bound to begin with.
-Backpressure arises naturally as the property of the entire system from the pairwaise interactions
+Backpressure arises naturally as the property of the entire system from the pairwise interactions
 between components which need to honor each-other limits.
 
 Here's another interesting consequence of static limits. One problem in highly concurrent
@@ -158,8 +158,8 @@ is represented by an explicit struct which is statically allocated as a field of
 representing component that owns the structure. So there's always a natural limit of how many
 concurrent tasks can be in flight!
 
-In summary, static allocation is not the goal, but rather a forcing function to ensure that
-everything has a limit, and a natural consequence of the limits.
+In summary, **static allocation is not the goal, but rather a forcing function to ensure that
+everything has a limit**, and a natural consequence of the limits.
 
 Somewhat surprisingly, our experience is that static allocation also simplifies the system greatly.
 You need to spend more time up-front thinking through what data you need to store where, but, after
@@ -173,7 +173,7 @@ also is just a consequence of knowing the limits, the "physics" of the underlyin
 
 TigerBeetle avoids dependencies. It depends on:
 
-- the Linux kernel API/ABI (in particular, on io_uring) to make hardware do things,
+- the Linux kernel API (in particular, on io_uring) to make hardware do things,
 - the Zig compiler, to convert from human-readable source code to machine code,
 - parts of Zig standard library, for various basic appliances like sorting algorithms or hash maps.
 
@@ -185,15 +185,15 @@ allocation is done throughout the stack, because we wrote most of the stack. It 
 intentional coincidence that Zig's standard library APIs are compatible with static allocation.
 
 Avoiding dependencies also acts as a forcing function for keeping the code simple and easy to
-understand, extra complexity can't sneak into the codebase hidden by a nifty API. It turns out that
+understand. Extra complexity can't sneak into the codebase hidden by a nifty API. It turns out that
 most of the code in the database isn't _that_ hard.
 
 ### Zig
 
 As follows from the [static allocation](#static-memory-allocation) section, TigerBeetle doesn't need
 a garbage collector. While it is possible to do static allocation in a GC language, it makes it much
-harder to control that no allocation actually happens. This significantly narrows down the choice of
-programming languages. Of the languages that remain, Zig makes the most sense, although Rust is a
+harder to guarantee that no allocation actually happens. This significantly narrows down the choice
+of programming languages. Of the languages that remain, Zig makes the most sense, although Rust is a
 close contender.
 
 Both Zig and Rust provide spatial memory safety. Rust has better temporal and thread safety, but
@@ -202,7 +202,7 @@ Additionally, mere memory safety would a low bar for TigerBeetle. General correc
 stakes, requiring a comprehensive testing strategy which leaves relatively narrow space for bugs to
 escape testing, but be caught by Rust-style type system.
 
-The primary benefit of Zig is the favorable ration of expressivity to language complexity.
+The primary benefit of Zig is the favorable ratio of expressivity to language complexity.
 "Expressivity" here means ability to produce the desired machine code, not source-level
 abstractions. Zig is a DSL for machine code, its comptime features makes it very easy to _directly_
 express what you want the computer to do. This expressivity comes at the cost of missing
@@ -214,9 +214,9 @@ constructor, and instead explicitly pass allocator to the specific methods that 
 which is a perfect fit for the memory management strategy used in TigerBeetle. Cross compilation
 that works and direct (glibc-less) bindings to the kernel help keep dependency count down.
 
-Most importantly, this all is possible using very little language machinery. Zig lends itself very
+Most importantly, this all is possible using very frugal language machinery. Zig lends itself very
 well to low-abstraction first-order code that does the work directly, which makes it easy to author
-and debug performance-minded code.
+and debug performance-oriented code.
 
 ### Determinism
 
@@ -226,9 +226,9 @@ the same physical path. There's no single specific reason to demand determinism,
 consistently simplify and improve the system. In general everything in TigerBeetle is deterministic,
 but here are some of the places where that determinism leads to big advantages:
 
-- Determinism greatly simplifies the implantation of a replicated state machine, as it reduces the
-  problem of synchronizing mutable state to a much simpler problem of immutable append-only log
-  synchronization.
+- Determinism greatly simplifies the implementation of a replicated state machine, as it reduces the
+  problem of synchronizing mutable state to a much simpler problem of synchronizing immutable,
+  append-only, hash-chained log.
 - Determinism allows for physical repair, as opposed to logical repair. Consider the case where a
   single byte of the storage of a particular LSM tree got corrupted. If the replicas only guarantee
   logical consistency, repairing this byte might entail re-transmitting an entire tree, which is
@@ -251,7 +251,7 @@ but here are some of the places where that determinism leads to big advantages:
 ### Simulation
 
 TigerBeetle uses a variety of techniques to ensure that the code is correct, from good old
-example-based test to strict style guide which emphasizes simplicity and directness. The most
+example-based tests to strict style guide which emphasizes simplicity and directness. The most
 important technique deployed is simulation testing, as seen on <https://sim.tigerbeetle.com>.
 
 TigerBeetle simulator, VOPR, can run an entire cluster on a single thread, injecting various storage
@@ -304,7 +304,34 @@ either all transfers, or all accounts. So the event-kind branching is moved out 
 
 ### Batching
 
+One of the most effective optimization principles is the idea of amortizing the overhead --- if you
+have to do a costly operation, make sure that its results "pay for" many smaller useful operation.
+TigerBeetle uses batching at many different levels:
+
+- Individual transfers are aggregated into a prepare, to amortize replication and prefetch IO
+  overhead.
+- Changes from 32 prepares are aggregated in memory before being written to disk together.
+- Changes from 1024 prepares are aggregated before checkpoint is atomically advanced by overwriting
+  the superblock.
+- The LSM tree operates mostly in terms of tables and value blocks, each aggregating many individual
+  records.
+
 ### Control Plane / Data Plane Separation
+
+Batching is a special case of the more general principle of separating control plane and data plane.
+Imagine yourself as a pilot in a cabin of a powerful jet. The cabin has all sorts of dials, levers
+and buttons. By pressing the buttons, you control the jet engines. Most of the work of moving the
+plane is done by the engines, the data plane. The pilot doesn't do the heavy lifting, they direct
+the power of the engine.
+
+In the context of TigerBeetle, deciding which prepare to apply would be control plane, but actually
+going through each individual transfer is data plane. In general, control plane is O(1) to data
+plane's O(N).
+
+It is important to clearly separate the two mods of operation. Keeping control plane `if`s outside
+of data plane `for`s keeps the inner loop free of branching, improving performance. Conversely, as
+the overhead of control plane is small, it can use very aggressive assertions, up to spending O(N)
+time to verify O(1) operation.
 
 ### Synchronous Execution
 
@@ -316,13 +343,23 @@ storage. This is the key to performance.
 
 Instead, all IO happens in the separate prefetch phase. Given a batch of transfers, it is possible
 to predict which accounts need to be fetched without actually executing the transfers. Whats more,
-while commit execution has to happen sequentially, all prefetch IO can happen in parallel. 
+while commit execution has to happen sequentially, all prefetch IO can happen in parallel.
 
 ### Embracing Concurrency
 
-### Pipelining
+This section is not fully written yet :-)
+
+- out of order prepare pipeline
+- compaction pipeline
+- replication can finish first on the backups
 
 ### Time
+
+This section is not fully written yet :-)
+
+- exposing reliable monotonic time to state machine
+- cluster time
+- safety net over NTP
 
 ## References
 
