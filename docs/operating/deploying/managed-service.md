@@ -1,7 +1,3 @@
----
-sidebar_position: 4
----
-
 # Managed Service
 
 Want to use TigerBeetle in production, along with automated disaster recovery, monitoring, and

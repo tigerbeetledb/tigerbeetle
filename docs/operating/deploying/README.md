@@ -16,9 +16,9 @@ curl -Lo tigerbeetle.zip https://linux.tigerbeetle.com && unzip tigerbeetle.zip 
 ./tigerbeetle format --cluster=0 --replica-count=3 --replica=1 ./0_1.tigerbeetle
 ./tigerbeetle format --cluster=0 --replica-count=3 --replica=2 ./0_2.tigerbeetle
 
-./tigerbeetle start --addresses=127.0.0.1:3000,127.0.0.1:3001,127.0.0.1:3002 ./0_0.tigerbeetle
-./tigerbeetle start --addresses=127.0.0.1:3000,127.0.0.1:3001,127.0.0.1:3002 ./0_1.tigerbeetle
-./tigerbeetle start --addresses=127.0.0.1:3000,127.0.0.1:3001,127.0.0.1:3002 ./0_2.tigerbeetle
+./tigerbeetle start --addresses=127.0.0.1:3000,127.0.0.1:3001,127.0.0.1:3002 ./0_0.tigerbeetle &
+./tigerbeetle start --addresses=127.0.0.1:3000,127.0.0.1:3001,127.0.0.1:3002 ./0_1.tigerbeetle &
+./tigerbeetle start --addresses=127.0.0.1:3000,127.0.0.1:3001,127.0.0.1:3002 ./0_2.tigerbeetle &
 ```
 
 Here what the arguments mean:
@@ -37,9 +37,13 @@ Here what the arguments mean:
 
 Production deployment differs in three aspects (see [Cluster Recommendations](../cluster.md)):
 
-- Six replicas are used rather than three.
 - Each replica runs on a dedicated machine.
+- Six replicas are used rather than three.
 - There's a supervisor process to restart a replica process after a crash.
+
+## Deployment Recipes
+
+We have recipes for some commonly used deployment tool:
 
 - [systemd](./systemd.md)
 - [Docker](./docker.md)

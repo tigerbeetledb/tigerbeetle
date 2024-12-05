@@ -1,10 +1,10 @@
-# Deploying on Linux
+# Deploying with systemd
 
-## systemd
+The following includes an example systemd unit for running TigerBeetle with Linux systems that use
+systemd. The unit is configured to start a single-node cluster, so you may need to adjust it for
+other cluster configurations.
 
-The following includes an example systemd unit for running TigerBeetle with Linux systems that use systemd. The unit is configured to start a single-node cluster, so you may need to adjust it for other cluster configurations.
-
-#### **tigerbeetle.service**
+### **tigerbeetle.service**
 ```
 [Unit]
 Description=TigerBeetle Replica
@@ -147,4 +147,4 @@ If the required memory cannot be locked, then the environment should be modified
 
 Memory locking is disabled for development environments when using the `--development` flag.
 
-For Linux running under Docker, refer to [Allowing MEMLOCK](docker.md#allowing-memlock).
+For Linux running under Docker, refer to [Allowing MEMLOCK](./docker.md#allowing-memlock).
