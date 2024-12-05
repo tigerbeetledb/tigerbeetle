@@ -7,7 +7,7 @@ relative to each other, and physical time is the everyday time, a numeric timest
 ## Logical Time
 
 TigerBeetle uses a consensus protocol ([Viewstamped
-replication](https://pmg.csail.mit.edu/papers/vr-revisited.pdf)) to guarantee [strict
+Replication](https://pmg.csail.mit.edu/papers/vr-revisited.pdf)) to guarantee [strict
 serializability](http://www.bailis.org/blog/linearizability-versus-serializability/) for all
 operations.
 
@@ -32,7 +32,7 @@ Financial transactions require physical time for multiple reasons, including:
 
 TigerBeetle uses two-layered approach to physical time. On the basic layer, each replica asks the
 underling operating system about the current time. Then, timing information from several replicas is
-aggregated to make sure that replica roughly agree on the time, to prevent a replica with a bad
+aggregated to make sure that the replicas roughly agree on the time, to prevent a replica with a bad
 clock from issuing incorrect timestamps. Additionally, this "cluster time" is made strictly
 monotonic, for end user's convenience.
 

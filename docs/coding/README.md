@@ -11,8 +11,6 @@ a series of loosely connected guides which can be read in any order.
 - [Time](./time.md) lists the guarantees provided by TigerBeetle cluster clock.
 - [Two-Phase Transfers](./two-phase-transfers.md) introduces pending transfer, one of the most
   powerful primitives built into TigerBeetle.
-- [Linked Transfers](./linked-transfers.md) explains how a sequence of simple transfers can be
-  combined into a larger indivisible transaction that either fails or succeeds as a single unit.
 - [Recipes](./recipes/) is a library of ready-made solutions for common business requirements such
   as a currency exchange.
 - [Clients](./clients/) shows how to use TigerBeetle from the comfort of .Net, Go, Java, Node.js, or
