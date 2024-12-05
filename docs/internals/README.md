@@ -21,3 +21,4 @@ If you want to lear how TigerBeetle works inside, here's what we got:
 - [Releases](./releases.md) is our release process.
 - [Talks](./talks.md) is the list of talks about TigerBeetle so far!
 - [VOPR](./vopr.md) and [testing](./testing.md) cover the simulator.
+- [docs](./docs.md) is our technical writing style guide. 
