@@ -570,9 +570,14 @@ pub fn ClientType(comptime StateMachine_: type, comptime MessageBus: type) type 
                 message.header.checksum,
             });
 
-            // We assume the primary is down and round-robin through the cluster:
+            // FIXME: Make the primary send pongs on a view change
+            // Don't round-robin through the cluster: we'll get notified by the new primary if
+            // there's been a view change, either by:
+            // * it sending a pong,
+            // * our ping_timeout,
+            // * an underlying TCP reconnection (which sends a ping).
             self.send_message_to_replica(
-                @as(u8, @intCast((self.view + self.request_timeout.attempts) % self.replica_count)),
+                @as(u8, @intCast(self.view % self.replica_count)),
                 message.base(),
             );
         }
@@ -661,12 +666,15 @@ pub fn ClientType(comptime StateMachine_: type, comptime MessageBus: type) type 
                 message.header.checksum,
             });
 
+            // FIXME: remove
+            self.message_bus.tick();
+
             assert(!self.request_timeout.ticking);
             self.request_timeout.start();
 
             // If our view number is out of date, then the old primary will forward our request.
             // If the primary is offline, then our request timeout will fire and we will
-            // round-robin.
+            // NOT round-robin. FIXME
             self.send_message_to_replica(
                 @as(u8, @intCast(self.view % self.replica_count)),
                 message.base(),

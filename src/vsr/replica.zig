@@ -8718,6 +8718,8 @@ pub fn ReplicaType(
                     self.prepare_timeout.start();
                     self.primary_abdicate_timeout.start();
                 }
+
+                self.send_preemptive_client_pongs();
             } else {
                 log.debug("{}: transition_to_normal_from_view_change_status: view={}..{} backup", .{
                     self.replica,
@@ -8761,6 +8763,23 @@ pub fn ReplicaType(
             self.reset_quorum_do_view_change();
 
             assert(self.do_view_change_quorum == false);
+        }
+
+        /// When a view change has been completed, let all the actively connected clients know. This
+        ///
+        fn send_preemptive_client_pongs(self: *Replica) void {
+            assert(self.status == .normal);
+            assert(self.primary());
+
+            for (self.message_bus.process.replica.clients.keyIterator()) |client| {
+                self.send_header_to_client(client, @bitCast(Header.PongClient{
+                    .command = .pong_client,
+                    .cluster = self.cluster,
+                    .replica = self.replica,
+                    .view = self.view,
+                    .release = self.release,
+                }));
+            }
         }
 
         /// A replica i that notices the need for a view change advances its view, sets its status
