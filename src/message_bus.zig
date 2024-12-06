@@ -824,7 +824,29 @@ fn MessageBusType(comptime process_type: vsr.ProcessType) type {
                             return null;
                         },
                         // The client connects only to replicas and should set peer when connecting:
-                        .client => assert(connection.peer == .replica),
+                        .client => {
+                            assert(connection.peer == .replica);
+
+                            const connection_maybe: ?*Connection = connection;
+                            const replica_index = std.mem.indexOfScalar(
+                                ?*Connection,
+                                bus.replicas,
+                                connection_maybe,
+                            ) orelse unreachable;
+
+                            if (replica_index != header.replica) {
+                                std.log.warn(
+                                    "incorrect replica order: index {} " ++
+                                        "should be at index {}. swapping internally.",
+                                    .{ replica_index, header.replica },
+                                );
+                                std.mem.swap(
+                                    ?*Connection,
+                                    &bus.replicas[replica_index],
+                                    &bus.replicas[header.replica],
+                                );
+                            }
+                        },
                     }
 
                     connection.recv_checked_header = true;
