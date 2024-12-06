@@ -1494,12 +1494,15 @@ pub fn ReplicaType(
 
             if (self.ignore_ping_client(message)) return;
 
+            const replica_count = self.replica_count; // FIXME: Needs to be gated by client version and 0 if older
+
             self.send_header_to_client(message.header.client, @bitCast(Header.PongClient{
                 .command = .pong_client,
                 .cluster = self.cluster,
                 .replica = self.replica,
                 .view = self.view,
                 .release = self.release,
+                .replica_count = replica_count,
             }));
         }
 
@@ -8771,13 +8774,17 @@ pub fn ReplicaType(
             assert(self.status == .normal);
             assert(self.primary());
 
-            for (self.message_bus.process.replica.clients.keyIterator()) |client| {
-                self.send_header_to_client(client, @bitCast(Header.PongClient{
+            var client_iterator = self.message_bus.process.clients.keyIterator();
+            while (client_iterator.next()) |client| {
+                const replica_count = self.replica_count; // FIXME: Needs to be gated by client version and 0 if older
+
+                self.send_header_to_client(client.*, @bitCast(Header.PongClient{
                     .command = .pong_client,
                     .cluster = self.cluster,
                     .replica = self.replica,
                     .view = self.view,
                     .release = self.release,
+                    .replica_count = replica_count,
                 }));
             }
         }

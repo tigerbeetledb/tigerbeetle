@@ -424,6 +424,13 @@ pub fn ClientType(comptime StateMachine_: type, comptime MessageBus: type) type 
                 });
                 self.view = pong.header.view;
             }
+
+            if (self.replica_count != pong.header.replica_count) {
+                std.debug.panic(
+                    "misconfigured client: expecting {} replicas, but {} exist",
+                    .{ self.replica_count, pong.header.replica_count },
+                );
+            }
         }
 
         fn on_reply(self: *Client, reply: *Message.Reply) void {
