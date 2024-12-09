@@ -470,16 +470,8 @@ pub fn GridType(comptime Storage: type) type {
         /// into panicking and non-panicking versions.
         pub fn reserve(grid: *Grid, blocks_count: usize) Reservation {
             assert(grid.callback == .none);
-            return grid.free_set.reserve(blocks_count) orelse vsr.fatal(
-                .storage_size_would_exceed_limit,
-                "data file would become too large size={} + reservation={} > limit={}, " ++
-                    "restart the replica increasing '--limit-storage'",
-                .{
-                    grid.superblock.working.vsr_state.checkpoint.storage_size,
-                    blocks_count * constants.block_size,
-                    grid.superblock.storage_size_limit,
-                },
-            );
+            return grid.free_set.reserve(blocks_count) orelse
+                stdx.unimplemented("storage_size_would_exceed_limit");
         }
 
         /// Forfeit a reservation.

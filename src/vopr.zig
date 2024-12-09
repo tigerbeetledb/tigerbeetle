@@ -218,6 +218,9 @@ pub fn main() !void {
         .in_flight_max = ReplySequence.stalled_queue_capacity,
     });
 
+    const simulator_requests_max =
+        constants.journal_slot_count * @as(u32, if (cli_args.lite) 1000 else 3);
+
     const simulator_options = Simulator.Options{
         .cluster = cluster_options,
         .workload = workload_options,
@@ -228,7 +231,7 @@ pub fn main() !void {
         .replica_restart_stability = random.uintLessThan(u32, 1_000),
         .replica_release_advance_probability = 0.0001,
         .replica_release_catchup_probability = 0.001,
-        .requests_max = constants.journal_slot_count * 3,
+        .requests_max = simulator_requests_max,
         .request_probability = 1 + random.uintLessThan(u8, 99),
         .request_idle_on_probability = random.uintLessThan(u8, 20),
         .request_idle_off_probability = 10 + random.uintLessThan(u8, 10),
