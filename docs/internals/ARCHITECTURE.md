@@ -347,11 +347,49 @@ while commit execution has to happen sequentially, all prefetch IO can happen in
 
 ### Embracing Concurrency
 
-This section is not fully written yet :-)
+Although TigerBeetle uses sequential execution as a simple and performant way to achieve strict
+serializability semantics, it doesn't mean that _everything_ has to be sequential. For example, as
+the previous section demonstrates, it is possible to simultaneously:
 
-- out of order prepare pipeline
-- compaction pipeline
-- replication can finish first on the backups
+- fetch data from storage in parallel,
+- apply double-entry accounting rules to transfers on the CPU sequentially.
+
+This pattern generalizes: TigerBeetle embraces concurrency. Sequential execution is the exception.
+
+- In the VSR protocol, prepares are replicated concurrently. That is, when a primary receives a
+  client request, assigns it an op-number and starts a replication loop, it doesn't wait for the
+  replication to finish before starting to work on the next request. _Execution_ of requests has to
+  be sequential, but replication can be concurrent.
+
+- Similarly, for a new prepare the primary concurrently:
+  - writes it to its local storage,
+  - and starts the replication loop.
+
+  Because the prepare is considered committed when the primary receives a quorum of `prepare_ok`
+  from a set of replicas which doesn't necessary include the primary itself, it can the case that
+  the primary concurrently executes a prepare while still writing corresponding message to the Write
+  Ahead Log (WAL).
+
+- A similar pipelining structure works in LSM compaction. Compaction is a batched two-way merge
+  operation. It merges two sorted sequencies of values, where values come from blocks on disk. The
+  resulting sequence of values is likewise split into blocks which are written to disk. Although the
+  merge needs to be sequential, it is possible to fetch several blocks from disk at the same time.
+  With some more legwork, it is possible to structure compaction such that reading blocks of values
+  from disk, merging values in memory, and writing the resulting blocks to disk can all happen
+  concurrently.
+
+### io_uring
+
+TigerBeetle use io_uring exclusively for IO. It is a perfect interface for TigerBeetle, as it
+combines [batching](#batching) and [concurrency](#embracing-concurrency). At the micro level, the
+code in TigerBeetle isn't a good fit for coroutines or threads, the concurrency is very
+fine-grained, at the level of individual syscall. For example, for pipelined compaction, the natural
+way to write code is to issues two concurrent syscalls for reading the data from the corresponding
+levels, and that's more or less exactly what io_uring exposes as an interface to the programmer.
+
+io_uring is _also_ the only reasonable way to have truly asynchronous disk io on Linux, and comes
+with improved throughput to boot, but these benefits are secondary to the interface being a natural
+fit for the problem. 
 
 ### Time
 
