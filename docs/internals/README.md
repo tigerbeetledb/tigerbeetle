@@ -7,7 +7,7 @@ TigerBeetle, you don't need to read this and could head straight to our user-lev
 
 If you want to lear how TigerBeetle works inside, here's what we got:
 
-- [TIGER_STYLE](./TIGER_STYLE.md) is _the_ style guide, and more. This is the philosophy underlining
+- [TIGER_STYLE](../TIGER_STYLE.md) is _the_ style guide, and more. This is the philosophy underlining
   all the code here!
 - [HACKING](./HACKING.md) gets you up to speed with building the codebase and running the tests.
 - [ARCHITECTURE](./ARCHITECTURE.md) is a one-page technical intro into TigerBeetle. If you are
@@ -21,4 +21,4 @@ If you want to lear how TigerBeetle works inside, here's what we got:
 - [Releases](./releases.md) is our release process.
 - [Talks](./talks.md) is the list of talks about TigerBeetle so far!
 - [VOPR](./vopr.md) and [testing](./testing.md) cover the simulator.
-- [docs](./docs.md) is our technical writing style guide. 
+- [docs](./docs.md) is our technical writing style guide.

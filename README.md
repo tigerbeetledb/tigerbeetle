@@ -9,7 +9,7 @@
   design decisions regarding performance, safety, and debit/credit primitives.
 * [Redesigning OLTP for a New Order of Magnitude (QCon SF)](https://www.infoq.com/presentations/redesign-oltp/)
   talk with a deeper dive into TigerBeetle’s local storage engine and global consensus protocol.
-* [TIGER_STYLE.md](./docs/internals/TIGER_STYLE.md), the engineering methodology behind TigerBeetle.
+* [TIGER_STYLE.md](./docs/TIGER_STYLE.md), the engineering methodology behind TigerBeetle.
 * [Slack](https://join.slack.com/t/tigerbeetle/shared_invite/zt-21xk62q7l-p~~G7~H01zQb88rQn7tWfQ), say hello!
 
 ## Start
