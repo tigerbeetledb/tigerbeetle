@@ -275,7 +275,7 @@ comptime {
 }
 
 /// Maximum number of headers from the WAL suffix to include in an SV message.
-/// Must at least cover the full pipeline.
+/// Must at least cover the full pipeline plus commit_min.
 /// Increasing this reduces likelihood that backups will need to repair their suffix's headers.
 ///
 /// CRITICAL:
@@ -284,6 +284,11 @@ comptime {
 ///   that cannot be repaired because they are gaps. See DVCQuorum for more detail.
 /// - +1 to leave room for commit_max, in case a backup converts the SV to a DVC.
 pub const view_change_headers_suffix_max = config.cluster.view_change_headers_suffix_max;
+comptime {
+    // lsm_batch_multiple is the lower bound on the size of primary's log, when the primary is at
+    // op=trigger+1.
+    assert(view_change_headers_max <= lsm_batch_multiple);
+}
 
 /// The number of prepare headers to include in the body of a DVC/SV.
 ///

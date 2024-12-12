@@ -4884,6 +4884,7 @@ pub fn ReplicaType(
                 self.view_headers.append(self.journal.header_with_op(op).?);
             }
             assert(self.view_headers.array.count() + 2 <= constants.view_change_headers_max);
+            assert(op >= self.op_repair_min());
 
             // Determine the consecutive extent of the log that we can help recover.
             // This may precede op_repair_min if we haven't had a view-change recently.
