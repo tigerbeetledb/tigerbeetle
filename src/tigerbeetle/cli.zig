@@ -64,7 +64,6 @@ const CLIArgs = union(enum) {
         cache_accounts: ?flags.ByteSize = null,
         cache_transfers: ?flags.ByteSize = null,
         cache_transfers_pending: ?flags.ByteSize = null,
-        cache_account_balances: ?flags.ByteSize = null,
         memory_lsm_manifest: ?flags.ByteSize = null,
         memory_lsm_compaction: ?flags.ByteSize = null,
         trace: ?[:0]const u8 = null,
@@ -94,7 +93,6 @@ const CLIArgs = union(enum) {
         cache_accounts: ?[]const u8 = null,
         cache_transfers: ?[]const u8 = null,
         cache_transfers_pending: ?[]const u8 = null,
-        cache_account_balances: ?[]const u8 = null,
         cache_grid: ?[]const u8 = null,
         account_count: usize = 10_000,
         account_count_hot: usize = 0,
@@ -338,7 +336,6 @@ const StartDefaults = struct {
     cache_accounts: flags.ByteSize,
     cache_transfers: flags.ByteSize,
     cache_transfers_pending: flags.ByteSize,
-    cache_account_balances: flags.ByteSize,
     cache_grid: flags.ByteSize,
     memory_lsm_compaction: flags.ByteSize,
 };
@@ -350,7 +347,6 @@ const start_defaults_production = StartDefaults{
     .cache_accounts = .{ .value = constants.cache_accounts_size_default },
     .cache_transfers = .{ .value = constants.cache_transfers_size_default },
     .cache_transfers_pending = .{ .value = constants.cache_transfers_pending_size_default },
-    .cache_account_balances = .{ .value = constants.cache_account_balances_size_default },
     .cache_grid = .{ .value = constants.grid_cache_size_default },
     .memory_lsm_compaction = .{
         // By default, add a few extra blocks for beat-scoped work.
@@ -364,7 +360,6 @@ const start_defaults_development = StartDefaults{
     .cache_accounts = .{ .value = 0 },
     .cache_transfers = .{ .value = 0 },
     .cache_transfers_pending = .{ .value = 0 },
-    .cache_account_balances = .{ .value = 0 },
     .cache_grid = .{ .value = constants.block_size * Grid.Cache.value_count_max_multiple },
     .memory_lsm_compaction = .{ .value = lsm_compaction_block_memory_min },
 };
@@ -395,7 +390,6 @@ pub const Command = union(enum) {
         cache_accounts: u32,
         cache_transfers: u32,
         cache_transfers_pending: u32,
-        cache_account_balances: u32,
         storage_size_limit: u64,
         pipeline_requests_limit: u32,
         request_size_limit: u32,
@@ -439,7 +433,6 @@ pub const Command = union(enum) {
         cache_accounts: ?[]const u8,
         cache_transfers: ?[]const u8,
         cache_transfers_pending: ?[]const u8,
-        cache_account_balances: ?[]const u8,
         cache_grid: ?[]const u8,
         account_count: usize,
         account_count_hot: usize,
@@ -622,7 +615,6 @@ fn parse_args_start(start: CLIArgs.Start) Command.Start {
     const AccountsValuesCache = groove_config.accounts.ObjectsCache.Cache;
     const TransfersValuesCache = groove_config.transfers.ObjectsCache.Cache;
     const TransfersPendingValuesCache = groove_config.transfers_pending.ObjectsCache.Cache;
-    const AccountBalancesValuesCache = groove_config.account_balances.ObjectsCache.Cache;
 
     const addresses = parse_addresses(start.addresses);
     const defaults =
@@ -786,12 +778,6 @@ fn parse_args_start(start: CLIArgs.Start) Command.Start {
             start.cache_transfers_pending orelse defaults.cache_transfers_pending,
             "--cache-transfers-pending",
         ),
-        .cache_account_balances = parse_cache_size_to_count(
-            StateMachine.AccountBalancesGrooveValue,
-            AccountBalancesValuesCache,
-            start.cache_account_balances orelse defaults.cache_account_balances,
-            "--cache-account-balances",
-        ),
         .cache_grid_blocks = parse_cache_size_to_count(
             [constants.block_size]u8,
             Grid.Cache,
@@ -840,7 +826,6 @@ fn parse_args_benchmark(benchmark: CLIArgs.Benchmark) Command.Benchmark {
         .cache_accounts = benchmark.cache_accounts,
         .cache_transfers = benchmark.cache_transfers,
         .cache_transfers_pending = benchmark.cache_transfers_pending,
-        .cache_account_balances = benchmark.cache_account_balances,
         .cache_grid = benchmark.cache_grid,
         .account_count = benchmark.account_count,
         .account_count_hot = benchmark.account_count_hot,

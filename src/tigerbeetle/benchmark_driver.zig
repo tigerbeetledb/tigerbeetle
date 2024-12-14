@@ -63,7 +63,6 @@ pub fn main(allocator: std.mem.Allocator, args: *const cli.Command.Benchmark) !v
             "cache_accounts",
             "cache_transfers",
             "cache_transfers_pending",
-            "cache_account_balances",
             "cache_grid",
             "trace",
             "file",
@@ -162,7 +161,6 @@ fn start(allocator: std.mem.Allocator, options: struct {
         .{ options.args.cache_accounts, "cache-accounts" },
         .{ options.args.cache_transfers, "cache-transfers" },
         .{ options.args.cache_transfers_pending, "cache-transfers-pending" },
-        .{ options.args.cache_account_balances, "cache-account-history" },
         .{ options.args.cache_grid, "cache-grid" },
         .{ options.args.trace, "trace" },
     };
