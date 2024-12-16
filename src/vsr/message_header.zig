@@ -502,7 +502,14 @@ pub const Header = extern struct {
         /// A client is allowed to have at most one request inflight at a time.
         request: u32,
         operation: Operation,
-        reserved: [59]u8 = [_]u8{0} ** 59,
+        reserved: [57]u8 = [_]u8{0} ** 57,
+
+        /// The number of batches included in the message payload.
+        /// Batch metadata occupies space at the end of the message body, see `vsr.Batch`.
+        /// When a request contains multiple batches, the message payload should be split
+        /// and executed by the state machine as if they were independent requests but still
+        /// within the same VSR operation.
+        batch_count: u16,
 
         fn invalid_header(self: *const @This()) ?[]const u8 {
             assert(self.command == .request);
@@ -524,6 +531,7 @@ pub const Header = extern struct {
                     {
                         return "register: size != @sizeOf(Header) [+ @sizeOf(vsr.RegisterRequest)]";
                     }
+                    if (self.batch_count != 0) return "register: batch_count != 0";
                 },
                 .pulse => {
                     // These requests don't originate from a real client or session.
@@ -532,6 +540,7 @@ pub const Header = extern struct {
                     if (self.session != 0) return "pulse: session != 0";
                     if (self.request != 0) return "pulse: request != 0";
                     if (self.size != @sizeOf(Header)) return "pulse: size != @sizeOf(Header)";
+                    if (self.batch_count != 0) return "pulse: batch_count != 0";
                 },
                 .upgrade => {
                     // These requests don't originate from a real client or session.
@@ -539,16 +548,18 @@ pub const Header = extern struct {
                     if (self.parent != 0) return "upgrade: parent != 0";
                     if (self.session != 0) return "upgrade: session != 0";
                     if (self.request != 0) return "upgrade: request != 0";
-
                     if (self.size != @sizeOf(Header) + @sizeOf(vsr.UpgradeRequest)) {
                         return "upgrade: size != @sizeOf(Header) + @sizeOf(vsr.UpgradeRequest)";
                     }
+                    if (self.batch_count != 0) return "upgrade: batch_count != 0";
                 },
                 else => {
                     if (self.operation == .reconfigure) {
                         if (self.size != @sizeOf(Header) + @sizeOf(vsr.ReconfigurationRequest)) {
-                            return "size != @sizeOf(Header) + @sizeOf(ReconfigurationRequest)";
+                            return "reconfigure: size != @sizeOf(Header)" ++
+                                " + @sizeOf(ReconfigurationRequest)";
                         }
+                        if (self.batch_count != 0) return "reconfigure: upgrade: batch_count != 0";
                     } else if (@intFromEnum(self.operation) < constants.vsr_operations_reserved) {
                         return "operation is reserved";
                     }
@@ -620,7 +631,14 @@ pub const Header = extern struct {
         request: u32,
         /// The state machine operation to apply.
         operation: Operation,
-        reserved: [3]u8 = [_]u8{0} ** 3,
+        reserved: [1]u8 = [_]u8{0} ** 1,
+
+        /// The number of batches included in the message payload.
+        /// Batch metadata occupies space at the end of the message body, see `vsr.Batch`.
+        /// When a request contains multiple batches, the message payload should be split
+        /// and executed by the state machine as if they were independent requests but still
+        /// within the same VSR operation.
+        batch_count: u16,
 
         fn invalid_header(self: *const Prepare) ?[]const u8 {
             assert(self.command == .prepare);
@@ -643,6 +661,7 @@ pub const Header = extern struct {
                     if (self.commit != 0) return "reserved: commit != 0";
                     if (self.request != 0) return "reserved: request != 0";
                     if (self.timestamp != 0) return "reserved: timestamp != 0";
+                    if (self.batch_count != 0) return "reserved: batch_count != 0";
                 },
                 .root => {
                     if (self.size != @sizeOf(Header)) return "root: size != @sizeOf(Header)";
@@ -660,6 +679,7 @@ pub const Header = extern struct {
                     if (self.commit != 0) return "root: commit != 0";
                     if (self.timestamp != 0) return "root: timestamp != 0";
                     if (self.request != 0) return "root: request != 0";
+                    if (self.batch_count != 0) return "root: batch_count != 0";
                 },
                 else => {
                     if (self.release.value == 0) return "release == 0";
@@ -678,6 +698,7 @@ pub const Header = extern struct {
                         self.operation == .upgrade)
                     {
                         if (self.request != 0) return "request != 0";
+                        if (self.batch_count != 0) return "batch_count != 0";
                     } else {
                         if (self.request == 0) return "request == 0";
                     }
@@ -704,6 +725,7 @@ pub const Header = extern struct {
                 .commit = 0,
                 .timestamp = 0,
                 .request = 0,
+                .batch_count = 0,
             };
             header.set_checksum_body(&[0]u8{});
             header.set_checksum();
@@ -727,6 +749,7 @@ pub const Header = extern struct {
                 .commit = 0,
                 .timestamp = 0,
                 .request = 0,
+                .batch_count = 0,
             };
             header.set_checksum_body(&[0]u8{});
             header.set_checksum();
@@ -856,7 +879,13 @@ pub const Header = extern struct {
         timestamp: u64,
         request: u32,
         operation: Operation = .reserved,
-        reserved: [19]u8 = [_]u8{0} ** 19,
+        reserved: [17]u8 = [_]u8{0} ** 17,
+
+        /// The number of batches included in the message payload.
+        /// Batch metadata occupies space at the end of the message body. See `vsr.Batch`.
+        /// The client is responsible for splitting the message payload and notifying
+        /// completion as if they were independent requests.
+        batch_count: u16,
 
         fn invalid_header(self: *const @This()) ?[]const u8 {
             assert(self.command == .reply);

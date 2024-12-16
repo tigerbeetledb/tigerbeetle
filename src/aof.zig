@@ -691,6 +691,7 @@ test "aof write / read" {
         .command = .prepare,
         .operation = @enumFromInt(4),
         .size = @intCast(@sizeOf(Header) + demo_payload.len),
+        .batch_count = 0,
     };
 
     stdx.copy_disjoint(.exact, u8, demo_message.body_used(), demo_payload);

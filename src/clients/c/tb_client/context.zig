@@ -468,6 +468,7 @@ pub fn ContextType(
                 .command = .request,
                 .operation = vsr.Operation.from(StateMachine, operation),
                 .size = @sizeOf(vsr.Header) + packet.batch_size,
+                .batch_count = 0,
             };
 
             // Copy all batched packet event data into the message.

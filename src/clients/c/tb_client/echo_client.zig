@@ -151,6 +151,7 @@ pub fn EchoClientType(
                 .command = .request,
                 .operation = .register,
                 .release = vsr.Release.minimum,
+                .batch_count = 0,
             };
 
             assert(self.request_number == 0);
