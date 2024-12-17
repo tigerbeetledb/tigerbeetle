@@ -187,7 +187,7 @@ pub fn StateMachineType(
             state_machine: *const StateMachine,
             client_release: vsr.Release,
             operation: Operation,
-            input: []align(16) const u8,
+            input: []const u8,
         ) bool {
             _ = state_machine;
             _ = client_release;
@@ -200,7 +200,7 @@ pub fn StateMachineType(
             state_machine: *StateMachine,
             client_release: vsr.Release,
             operation: Operation,
-            input: []align(16) const u8,
+            input: []const u8,
         ) void {
             _ = state_machine;
             _ = client_release;
@@ -214,7 +214,7 @@ pub fn StateMachineType(
             client_release: vsr.Release,
             op: u64,
             operation: Operation,
-            input: []align(16) const u8,
+            input: []const u8,
         ) void {
             _ = client_release;
             _ = operation;
@@ -247,8 +247,8 @@ pub fn StateMachineType(
             op: u64,
             timestamp: u64,
             operation: Operation,
-            input: []align(16) const u8,
-            output: *align(16) [constants.message_body_size_max]u8,
+            input: []const u8,
+            output: []u8,
         ) usize {
             assert(op != 0);
 

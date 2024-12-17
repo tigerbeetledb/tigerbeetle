@@ -606,12 +606,12 @@ pub fn StateMachineType(
         commit_timestamp: u64,
         forest: Forest,
 
-        prefetch_input: ?[]align(16) const u8 = null,
+        prefetch_input: ?[]const u8 = null,
         prefetch_callback: ?*const fn (*StateMachine) void = null,
         prefetch_context: PrefetchContext = .null,
 
         scan_lookup: ScanLookup = .null,
-        scan_lookup_buffer: []align(16) u8,
+        scan_lookup_buffer: []u8,
         scan_lookup_result_count: ?u32 = null,
         scan_lookup_next_tick: Grid.NextTick = undefined,
 
@@ -709,7 +709,7 @@ pub fn StateMachineType(
             self: *const StateMachine,
             client_release: vsr.Release,
             operation: Operation,
-            input: []align(16) const u8,
+            input: []const u8,
         ) bool {
             assert(input.len <= self.batch_size_limit);
 
@@ -718,18 +718,43 @@ pub fn StateMachineType(
                     if (input.len != 0) return false;
                 },
                 .get_account_transfers, .get_account_balances => {
-                    const event_size: u32 = if (AccountFilterFormer.required(client_release))
-                        @sizeOf(AccountFilterFormer)
+                    const event_size: usize, const alignment: usize =
+                        if (AccountFilterFormer.required(client_release))
+                        .{ @sizeOf(AccountFilterFormer), @alignOf(AccountFilterFormer) }
                     else
-                        @sizeOf(AccountFilter);
+                        .{ @sizeOf(AccountFilter), @alignOf(AccountFilter) };
 
+                    if (!std.mem.isAligned(@intFromPtr(input.ptr), alignment)) {
+                        log.info("Invalid input alignment for {s}", .{
+                            @tagName(operation),
+                        });
+                        return false;
+                    }
                     if (input.len != event_size) return false;
                 },
                 .query_accounts, .query_transfers => {
+                    const alignment = @alignOf(QueryFilter);
+                    if (!std.mem.isAligned(@intFromPtr(input.ptr), alignment)) {
+                        log.info("Invalid input alignment for {s}", .{
+                            @tagName(operation),
+                        });
+                        return false;
+                    }
+
                     if (input.len != @sizeOf(QueryFilter)) return false;
                 },
                 inline else => |comptime_operation| {
-                    const event_size = @sizeOf(EventType(comptime_operation));
+                    const Event = EventType(comptime_operation);
+
+                    const alignment = @alignOf(Event);
+                    if (!std.mem.isAligned(@intFromPtr(input.ptr), alignment)) {
+                        log.info("Invalid input alignment for {s}", .{
+                            @tagName(operation),
+                        });
+                        return false;
+                    }
+
+                    const event_size = @sizeOf(Event);
                     comptime assert(event_size > 0);
 
                     const batch_limit: u32 =
@@ -753,15 +778,15 @@ pub fn StateMachineType(
             self: *StateMachine,
             client_release: vsr.Release,
             operation: Operation,
-            input: []align(16) const u8,
+            input: []const u8,
         ) void {
             assert(self.input_valid(client_release, operation, input));
             assert(input.len <= self.batch_size_limit);
 
             self.prepare_timestamp += switch (operation) {
                 .pulse => 0,
-                .create_accounts => mem.bytesAsSlice(Account, input).len,
-                .create_transfers => mem.bytesAsSlice(Transfer, input).len,
+                .create_accounts => @divExact(input.len, @sizeOf(Account)),
+                .create_transfers => @divExact(input.len, @sizeOf(Transfer)),
                 .lookup_accounts => 0,
                 .lookup_transfers => 0,
                 .get_account_transfers => 0,
@@ -785,7 +810,7 @@ pub fn StateMachineType(
             client_release: vsr.Release,
             op: u64,
             operation: Operation,
-            input: []align(16) const u8,
+            input: []const u8,
         ) void {
             _ = op;
             assert(self.prefetch_input == null);
@@ -810,16 +835,20 @@ pub fn StateMachineType(
                     self.prefetch_expire_pending_transfers();
                 },
                 .create_accounts => {
-                    self.prefetch_create_accounts(mem.bytesAsSlice(Account, input));
+                    const batch: []const Account = @alignCast(mem.bytesAsSlice(Account, input));
+                    self.prefetch_create_accounts(batch);
                 },
                 .create_transfers => {
-                    self.prefetch_create_transfers(mem.bytesAsSlice(Transfer, input));
+                    const batch: []const Transfer = @alignCast(mem.bytesAsSlice(Transfer, input));
+                    self.prefetch_create_transfers(batch);
                 },
                 .lookup_accounts => {
-                    self.prefetch_lookup_accounts(mem.bytesAsSlice(u128, input));
+                    const batch: []const u128 = @alignCast(mem.bytesAsSlice(u128, input));
+                    self.prefetch_lookup_accounts(batch);
                 },
                 .lookup_transfers => {
-                    self.prefetch_lookup_transfers(mem.bytesAsSlice(u128, input));
+                    const batch: []const u128 = @alignCast(mem.bytesAsSlice(u128, input));
+                    self.prefetch_lookup_transfers(batch);
                 },
                 .get_account_transfers => {
                     self.prefetch_get_account_transfers(account_filter_from_input(input));
@@ -913,7 +942,10 @@ pub fn StateMachineType(
             const self: *StateMachine = PrefetchContext.parent(.transfers, completion);
             self.prefetch_context = .null;
 
-            const transfers: []const Transfer = mem.bytesAsSlice(Transfer, self.prefetch_input.?);
+            const transfers: []const Transfer = @alignCast(mem.bytesAsSlice(
+                Transfer,
+                self.prefetch_input.?,
+            ));
             for (transfers) |*t| {
                 if (t.flags.post_pending_transfer or t.flags.void_pending_transfer) {
                     if (self.get_transfer(t.pending_id)) |p| {
@@ -1016,11 +1048,11 @@ pub fn StateMachineType(
             if (self.get_scan_from_account_filter(filter)) |scan| {
                 assert(self.forest.scan_buffer_pool.scan_buffer_used > 0);
 
-                var scan_buffer = std.mem.bytesAsSlice(
+                var scan_buffer: []Transfer = @alignCast(std.mem.bytesAsSlice(
                     Transfer,
                     self.scan_lookup_buffer[0 .. @sizeOf(Transfer) *
                         constants.batch_max.get_account_transfers],
-                );
+                ));
                 assert(scan_buffer.len <= constants.batch_max.get_account_transfers);
 
                 var scan_lookup = self.scan_lookup.get(.transfers);
@@ -1095,10 +1127,12 @@ pub fn StateMachineType(
                     if (self.get_scan_from_account_filter(filter)) |scan| {
                         assert(self.forest.scan_buffer_pool.scan_buffer_used > 0);
 
-                        var scan_lookup_buffer = std.mem.bytesAsSlice(
-                            AccountBalancesGrooveValue,
-                            self.scan_lookup_buffer[0 .. @sizeOf(AccountBalancesGrooveValue) *
-                                constants.batch_max.get_account_balances],
+                        var scan_lookup_buffer: []AccountBalancesGrooveValue = @alignCast(
+                            std.mem.bytesAsSlice(
+                                AccountBalancesGrooveValue,
+                                self.scan_lookup_buffer[0 .. @sizeOf(AccountBalancesGrooveValue) *
+                                    constants.batch_max.get_account_balances],
+                            ),
                         );
 
                         var scan_lookup = self.scan_lookup.get(.account_balances);
@@ -1335,11 +1369,11 @@ pub fn StateMachineType(
             )) |scan| {
                 assert(self.forest.scan_buffer_pool.scan_buffer_used > 0);
 
-                const scan_buffer = std.mem.bytesAsSlice(
+                const scan_buffer: []Account = @alignCast(std.mem.bytesAsSlice(
                     Account,
                     self.scan_lookup_buffer[0 .. @sizeOf(Account) *
                         constants.batch_max.query_accounts],
-                );
+                ));
                 assert(scan_buffer.len <= constants.batch_max.query_accounts);
 
                 const scan_lookup = self.scan_lookup.get(.accounts);
@@ -1394,11 +1428,11 @@ pub fn StateMachineType(
             )) |scan| {
                 assert(self.forest.scan_buffer_pool.scan_buffer_used > 0);
 
-                var scan_buffer = std.mem.bytesAsSlice(
+                var scan_buffer: []Transfer = @alignCast(std.mem.bytesAsSlice(
                     Transfer,
                     self.scan_lookup_buffer[0 .. @sizeOf(Transfer) *
                         constants.batch_max.query_transfers],
-                );
+                ));
                 assert(scan_buffer.len <= constants.batch_max.query_transfers);
 
                 var scan_lookup = self.scan_lookup.get(.transfers);
@@ -1521,10 +1555,10 @@ pub fn StateMachineType(
                 @sizeOf(Transfer),
             ) * @sizeOf(Transfer);
 
-            const scan_lookup_buffer = std.mem.bytesAsSlice(
+            const scan_lookup_buffer: []Transfer = @alignCast(std.mem.bytesAsSlice(
                 Transfer,
                 self.scan_lookup_buffer[0..scan_buffer_size],
-            );
+            ));
 
             const transfers_groove: *TransfersGroove = &self.forest.grooves.transfers;
             const scan = self.expire_pending_transfers.scan(
@@ -1565,10 +1599,10 @@ pub fn StateMachineType(
         }
 
         fn prefetch_expire_pending_transfers_accounts(self: *StateMachine) void {
-            const transfers: []const Transfer = std.mem.bytesAsSlice(
+            const transfers: []const Transfer = @alignCast(std.mem.bytesAsSlice(
                 Transfer,
                 self.scan_lookup_buffer[0 .. self.scan_lookup_result_count.? * @sizeOf(Transfer)],
-            );
+            ));
 
             const grooves = &self.forest.grooves;
             for (transfers) |expired| {
@@ -1616,8 +1650,8 @@ pub fn StateMachineType(
             op: u64,
             timestamp: u64,
             operation: Operation,
-            input: []align(16) const u8,
-            output: *align(16) [constants.message_body_size_max]u8,
+            input: []const u8,
+            output: []u8,
         ) usize {
             _ = client;
             assert(op != 0);
@@ -1766,13 +1800,16 @@ pub fn StateMachineType(
             comptime operation: Operation,
             client_release: vsr.Release,
             timestamp: u64,
-            input: []align(16) const u8,
-            output: *align(16) [constants.message_body_size_max]u8,
+            input: []const u8,
+            output: []u8,
         ) usize {
             comptime assert(operation == .create_accounts or operation == .create_transfers);
 
-            const events = mem.bytesAsSlice(EventType(operation), input);
-            var results = mem.bytesAsSlice(ResultType(operation), output);
+            const Event = EventType(operation);
+            const Result = ResultType(operation);
+
+            const events: []const Event = @alignCast(mem.bytesAsSlice(Event, input));
+            var results: []Result = @alignCast(mem.bytesAsSlice(Result, output));
             var count: usize = 0;
 
             var chain: ?usize = null;
@@ -1875,7 +1912,7 @@ pub fn StateMachineType(
             assert(chain == null);
             assert(chain_broken == false);
 
-            return @sizeOf(ResultType(operation)) * count;
+            return @sizeOf(Result) * count;
         }
 
         fn transient_error(
@@ -1911,11 +1948,15 @@ pub fn StateMachineType(
         fn execute_lookup_accounts(
             self: *StateMachine,
             input: []const u8,
-            output: *align(16) [constants.message_body_size_max]u8,
+            output: []u8,
         ) usize {
-            const batch = mem.bytesAsSlice(u128, input);
-            const output_len = @divFloor(output.len, @sizeOf(Account)) * @sizeOf(Account);
-            const results = mem.bytesAsSlice(Account, output[0..output_len]);
+            const batch: []const u128 = @alignCast(mem.bytesAsSlice(u128, input));
+            const results: []Account = @alignCast(mem.bytesAsSlice(
+                Account,
+                output,
+            ));
+            assert(results.len >= batch.len);
+
             var results_count: usize = 0;
             for (batch) |id| {
                 if (self.get_account(id)) |account| {
@@ -1930,11 +1971,15 @@ pub fn StateMachineType(
         fn execute_lookup_transfers(
             self: *StateMachine,
             input: []const u8,
-            output: *align(16) [constants.message_body_size_max]u8,
+            output: []u8,
         ) usize {
-            const batch = mem.bytesAsSlice(u128, input);
-            const output_len = @divFloor(output.len, @sizeOf(Transfer)) * @sizeOf(Transfer);
-            const results = mem.bytesAsSlice(Transfer, output[0..output_len]);
+            const batch: []const u128 = @alignCast(mem.bytesAsSlice(u128, input));
+            const results: []Transfer = @alignCast(mem.bytesAsSlice(
+                Transfer,
+                output,
+            ));
+            assert(results.len >= batch.len);
+
             var results_count: usize = 0;
             for (batch) |id| {
                 if (self.get_transfer(id)) |result| {
@@ -1948,7 +1993,7 @@ pub fn StateMachineType(
         fn execute_get_account_transfers(
             self: *StateMachine,
             input: []const u8,
-            output: *align(16) [constants.message_body_size_max]u8,
+            output: []u8,
         ) usize {
             _ = input;
             if (self.scan_lookup_result_count == null) return 0; // invalid filter
@@ -1973,7 +2018,7 @@ pub fn StateMachineType(
         fn execute_get_account_balances(
             self: *StateMachine,
             input: []const u8,
-            output: *align(16) [constants.message_body_size_max]u8,
+            output: []u8,
         ) usize {
             if (self.scan_lookup_result_count == null) return 0; // invalid filter
             assert(self.scan_lookup_result_count.? <= constants.batch_max.get_account_balances);
@@ -1983,15 +2028,20 @@ pub fn StateMachineType(
 
             const filter = account_filter_from_input(input);
 
-            const scan_results: []const AccountBalancesGrooveValue = mem.bytesAsSlice(
-                AccountBalancesGrooveValue,
-                self.scan_lookup_buffer[0 .. self.scan_lookup_result_count.? *
-                    @sizeOf(AccountBalancesGrooveValue)],
+            const scan_results: []const AccountBalancesGrooveValue = @alignCast(
+                mem.bytesAsSlice(
+                    AccountBalancesGrooveValue,
+                    self.scan_lookup_buffer[0 .. self.scan_lookup_result_count.? *
+                        @sizeOf(AccountBalancesGrooveValue)],
+                ),
             );
 
-            const output_slice: []AccountBalance = mem.bytesAsSlice(AccountBalance, output);
-            var output_count: usize = 0;
+            const output_slice: []AccountBalance = @alignCast(mem.bytesAsSlice(
+                AccountBalance,
+                output,
+            ));
 
+            var output_count: usize = 0;
             for (scan_results) |*result| {
                 assert(result.dr_account_id != result.cr_account_id);
 
@@ -2022,7 +2072,7 @@ pub fn StateMachineType(
         fn execute_query_accounts(
             self: *StateMachine,
             input: []const u8,
-            output: *align(16) [constants.message_body_size_max]u8,
+            output: []u8,
         ) usize {
             _ = input;
             if (self.scan_lookup_result_count == null) return 0; // invalid filter
@@ -2046,7 +2096,7 @@ pub fn StateMachineType(
         fn execute_query_transfers(
             self: *StateMachine,
             input: []const u8,
-            output: *align(16) [constants.message_body_size_max]u8,
+            output: []u8,
         ) usize {
             _ = input;
             if (self.scan_lookup_result_count == null) return 0; // invalid filter
@@ -2839,10 +2889,10 @@ pub fn StateMachineType(
             defer self.scan_lookup_result_count = null;
             if (self.scan_lookup_result_count.? == 0) return 0;
 
-            const transfers: []const Transfer = std.mem.bytesAsSlice(
+            const transfers: []const Transfer = @alignCast(std.mem.bytesAsSlice(
                 Transfer,
                 self.scan_lookup_buffer[0 .. self.scan_lookup_result_count.? * @sizeOf(Transfer)],
-            );
+            ));
 
             log.debug("expire_pending_transfers: len={}", .{transfers.len});
 
@@ -3442,8 +3492,8 @@ const TestContext = struct {
         context: *TestContext,
         op: u64,
         operation: TestContext.StateMachine.Operation,
-        input: []align(16) const u8,
-        output: *align(16) [message_body_size_max]u8,
+        input: []const u8,
+        output: []u8,
     ) usize {
         const timestamp = context.state_machine.prepare_timestamp;
 
