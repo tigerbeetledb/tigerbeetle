@@ -184,11 +184,13 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
             const storage_fault_atlas = try allocator.create(StorageFaultAtlas);
             errdefer allocator.destroy(storage_fault_atlas);
 
-            storage_fault_atlas.* = StorageFaultAtlas.init(
+            storage_fault_atlas.* = try StorageFaultAtlas.init(
+                allocator,
                 options.replica_count,
                 random,
                 options.storage_fault_atlas,
             );
+            errdefer storage_fault_atlas.deinit(allocator);
 
             var grid_checker = try allocator.create(GridChecker);
             errdefer allocator.destroy(grid_checker);
@@ -412,6 +414,7 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
             for (cluster.storages) |*storage| storage.deinit(cluster.allocator);
             for (cluster.aofs) |*aof| aof.deinit(cluster.allocator);
 
+            cluster.storage_fault_atlas.deinit(cluster.allocator);
             cluster.grid_checker.deinit(); // (Storage references this.)
 
             cluster.allocator.free(cluster.clients);

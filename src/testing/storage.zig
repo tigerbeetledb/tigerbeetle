@@ -30,6 +30,7 @@ const math = std.math;
 const mem = std.mem;
 
 const FIFOType = @import("../fifo.zig").FIFOType;
+const IOPSType = @import("../iops.zig").IOPSType;
 const constants = @import("../constants.zig");
 const vsr = @import("../vsr.zig");
 const superblock = @import("../vsr/superblock.zig");
@@ -78,6 +79,9 @@ pub const Storage = struct {
         /// Chance out of 100 that a write will corrupt a sector, if the target memory is within
         /// a faulty area of this replica.
         write_fault_probability: u8 = 0,
+        /// Chance out of 100 that a write will misdirect to the wrong sector, if the target memory
+        /// is within a faulty area of this replica.
+        write_misdirect_probability: u8 = 0,
         /// Chance out of 100 that a crash will corrupt a sector of a pending write's target,
         /// if the target memory is within a faulty area of this replica.
         crash_fault_probability: u8 = 0,
@@ -139,6 +143,9 @@ pub const Storage = struct {
 
     pub const NextTickSource = enum { lsm, vsr };
 
+    /// See `Storage.overlays`.
+    const overlays_count_max = 2;
+
     allocator: mem.Allocator,
 
     size: u64,
@@ -151,7 +158,36 @@ pub const Storage = struct {
     /// Set bits correspond to faulty sectors. The underlying sectors of `memory` is left clean.
     faults: std.DynamicBitSetUnmanaged,
 
-    /// Whether to enable faults (when false, this supersedes `faulty_wal_areas`).
+    /// Overlays take precedence over the data in `memory`.
+    ///
+    /// Each misdirected write creates two overlays.
+    /// When a misdirected write is triggered:
+    /// - The intended target is overlaid with its old data.
+    /// - The intended target's `memory` is set to the `write.buffer` data.
+    /// - The mistaken target is overlaid with the `write.buffer` data.
+    /// - The mistaken target's `memory` is left untouched.
+    ///
+    /// The reason for all of this is:
+    /// - By keeping `memory` pristine, we can trivially disable both sides of the misdirected-write
+    ///   fault by flipping the `faulty` flag.
+    /// - By tracking the overlays separately, they can be repaired separately.
+    ///
+    /// Other notes:
+    /// - We allow for (at most) one misdirect fault per Storage for the time being, for simplicity
+    ///   and because double-faults are not covered by our fault model. This will hopefully match
+    ///   physical disks – misdirected faults are an order of magnitude less frequent than bit rot,
+    ///   which in turn is an order of magnitude less frequent than LSEs.
+    /// - In order to keep things interesting:
+    ///   - misdirections are always within the same zone,
+    ///   - the entire write is misdirected (rather than only some of the sectors), and
+    ///   - the misdirected write lands on a convenient offset.
+    ///   Thanks to rigorous checksums, misdirections that break these rules just manifest as
+    ///   corruptions, and corruption is already well-tested (see `faults`). The goal here is to
+    ///   test how TigerBeetle handles well-formed but incorrectly-located data.
+    overlays: IOPSType(struct { zone: vsr.Zone, offset: u64, size: u32 }, overlays_count_max) = .{},
+    overlay_buffers: [overlays_count_max][]align(constants.sector_size) u8,
+
+    /// Whether to enable faults (when false, this supersedes `faulty_wal_areas` &c).
     /// This is used to disable faults during the replica's first startup.
     faulty: bool = true,
 
@@ -167,6 +203,11 @@ pub const Storage = struct {
         assert(options.read_latency_mean >= options.read_latency_min);
         assert(options.fault_atlas == null or options.replica_index != null);
 
+        assert(options.read_fault_probability <= 100);
+        assert(options.write_fault_probability <= 100);
+        assert(options.write_misdirect_probability <= 100);
+        assert(options.crash_fault_probability <= 100);
+
         const prng = std.rand.DefaultPrng.init(options.seed);
         const sector_count = @divExact(size, constants.sector_size);
         const memory = try allocator.alignedAlloc(u8, constants.sector_size, size);
@@ -177,6 +218,16 @@ pub const Storage = struct {
 
         var faults = try std.DynamicBitSetUnmanaged.initEmpty(allocator, sector_count);
         errdefer faults.deinit(allocator);
+
+        var overlay_buffers_allocated: u32 = 0;
+        var overlay_buffers: [overlays_count_max][]align(constants.sector_size) u8 = undefined;
+        errdefer for (overlay_buffers) |b| allocator.free(b);
+
+        for (&overlay_buffers) |*overlay_buffer| {
+            overlay_buffer.* =
+                try allocator.alignedAlloc(u8, constants.sector_size, constants.message_size_max);
+            overlay_buffers_allocated += 1;
+        }
 
         var reads = PriorityQueue(*Storage.Read, void, Storage.Read.less_than).init(allocator, {});
         errdefer reads.deinit();
@@ -195,12 +246,14 @@ pub const Storage = struct {
             .memory = memory,
             .memory_written = memory_written,
             .faults = faults,
+            .overlay_buffers = overlay_buffers,
             .reads = reads,
             .writes = writes,
         };
     }
 
     pub fn deinit(storage: *Storage, allocator: mem.Allocator) void {
+        for (storage.overlay_buffers) |b| allocator.free(b);
         allocator.free(storage.memory);
         storage.memory_written.deinit(allocator);
         storage.faults.deinit(allocator);
@@ -395,19 +448,60 @@ pub const Storage = struct {
         );
 
         if (storage.x_in_100(storage.options.read_fault_probability)) {
-            storage.fault_faulty_sectors(read.zone, read.offset, read.buffer.len);
+            if (storage.pick_faulty_sector(read.zone, read.offset, read.buffer.len)) |sector| {
+                storage.fault_sector(read.zone, sector);
+            }
         }
+
+        const faulty = storage.faulty and faulty: {
+            if (read.zone != .wal_prepares) break :faulty true;
+
+            // Don't corrupt a WAL prepare if the corresponding WAL header write was misdirected, to
+            // avoid a double-fault which the journal interprets as a torn prepare.
+            const header_slot = @divExact(read.offset, constants.message_size_max);
+            const header_offset = vsr.sector_floor(header_slot * @sizeOf(vsr.Header));
+
+            var overlays_iterator = storage.overlays.iterate();
+            while (overlays_iterator.next()) |overlay| {
+                if (overlay.zone == .wal_headers and overlay.offset == header_offset) {
+                    break :faulty false;
+                }
+            }
+            break :faulty true;
+        };
 
         // Fill faulty or uninitialized sectors with random data.
         var sectors = SectorRange.from_zone(read.zone, read.offset, read.buffer.len);
         const sectors_min = sectors.min;
         while (sectors.next()) |sector| {
-            const faulty = storage.faulty and storage.faults.isSet(sector);
+            const faulty_sector = faulty and storage.faults.isSet(sector);
             const uninit = !storage.memory_written.isSet(sector);
-            if (faulty or uninit) {
+            if (faulty_sector or uninit) {
                 const sector_offset = (sector - sectors_min) * constants.sector_size;
                 const sector_bytes = read.buffer[sector_offset..][0..constants.sector_size];
                 storage.prng.random().bytes(sector_bytes);
+            }
+        }
+
+        // Apply misdirected data.
+        if (storage.faulty) {
+            var overlays_iterator = storage.overlays.iterate();
+            while (overlays_iterator.next()) |overlay| {
+                if (overlay.zone == read.zone and
+                    overlay.offset == read.offset)
+                {
+                    log.debug("{}: read_sectors_finish: apply misdirect " ++
+                        "zone={s} offset={} size={}", .{
+                        storage.options.replica_index.?,
+                        @tagName(overlay.zone),
+                        overlay.offset,
+                        overlay.size,
+                    });
+
+                    const overlay_buffer = storage.overlay_buffers[storage.overlays.index(overlay)];
+                    const overlay_target = overlay_buffer[0..@min(overlay.size, read.buffer.len)];
+                    stdx.copy_disjoint(.inexact, u8, read.buffer, overlay_target);
+                }
             }
         }
 
@@ -448,7 +542,54 @@ pub const Storage = struct {
     }
 
     fn write_sectors_finish(storage: *Storage, write: *Storage.Write) void {
+        assert(storage.overlays.total() >= 2);
+
         hash_log.emit_autohash(.{ write.buffer, write.zone, write.offset }, .DeepRecursive);
+
+        // Clean up old misdirects if they are overwritten.
+        var overlays_iterator = storage.overlays.iterate();
+        while (overlays_iterator.next()) |overlay| {
+            if (overlay.zone == write.zone and
+                overlay.offset == write.offset)
+            {
+                storage.overlays.release(overlay);
+            }
+        }
+
+        // Apply a new misdirect.
+        const misdirect = storage.overlays.available() >= 2 and
+            storage.pick_faulty_sector(write.zone, write.offset, write.buffer.len) != null and
+            storage.x_in_100(storage.options.write_misdirect_probability);
+        const misdirect_offset = if (misdirect) storage.pick_faulty_chunk_offset(write) else null;
+        if (misdirect_offset) |mistaken_offset| {
+            const overlay_mistaken = storage.overlays.acquire().?;
+            const overlay_intended = storage.overlays.acquire().?;
+
+            const overlay_mistaken_index = storage.overlays.index(overlay_mistaken);
+            const overlay_intended_index = storage.overlays.index(overlay_intended);
+
+            log.debug("{}: write_sectors_finish: misdirect zone={s} offset={}->{} size={}", .{
+                storage.options.replica_index.?,
+                @tagName(write.zone),
+                write.offset,
+                mistaken_offset,
+                write.buffer.len,
+            });
+
+            const overlay_size: u32 = @intCast(write.buffer.len);
+            overlay_mistaken.* =
+                .{ .zone = write.zone, .offset = mistaken_offset, .size = overlay_size };
+            overlay_intended.* =
+                .{ .zone = write.zone, .offset = write.offset, .size = overlay_size };
+
+            const overlay_mistaken_buffer = storage.overlay_buffers[overlay_mistaken_index];
+            const overlay_intended_buffer = storage.overlay_buffers[overlay_intended_index];
+            const target_intended_buffer =
+                storage.memory[write.zone.offset(write.offset)..][0..write.buffer.len];
+
+            stdx.copy_disjoint(.inexact, u8, overlay_mistaken_buffer, write.buffer);
+            stdx.copy_disjoint(.inexact, u8, overlay_intended_buffer, target_intended_buffer);
+        }
 
         const offset_in_storage = write.zone.offset(write.offset);
         stdx.copy_disjoint(
@@ -465,7 +606,9 @@ pub const Storage = struct {
         }
 
         if (storage.x_in_100(storage.options.write_fault_probability)) {
-            storage.fault_faulty_sectors(write.zone, write.offset, write.buffer.len);
+            if (storage.pick_faulty_sector(write.zone, write.offset, write.buffer.len)) |sector| {
+                storage.fault_sector(write.zone, sector);
+            }
         }
 
         write.callback(write);
@@ -492,27 +635,30 @@ pub const Storage = struct {
         return x > storage.prng.random().uintLessThan(u8, 100);
     }
 
-    fn fault_faulty_sectors(
+    fn pick_faulty_sector(
         storage: *Storage,
         zone: vsr.Zone,
         offset_in_zone: u64,
         size: u64,
-    ) void {
-        const atlas = storage.options.fault_atlas orelse return;
-        const replica_index = storage.options.replica_index.?;
-        const faulty_sectors = switch (zone) {
-            .superblock => atlas.faulty_superblock(replica_index, offset_in_zone, size),
-            .wal_headers => atlas.faulty_wal_headers(replica_index, offset_in_zone, size),
-            .wal_prepares => atlas.faulty_wal_prepares(replica_index, offset_in_zone, size),
-            .client_replies => atlas.faulty_client_replies(replica_index, offset_in_zone, size),
-            // We assert that the padding is never read, so there's no need to fault it.
-            .grid_padding => return,
-            .grid => atlas.faulty_grid(replica_index, offset_in_zone, size),
-        } orelse return;
+    ) ?usize {
+        const atlas = storage.options.fault_atlas orelse return null;
+        return atlas.faulty_sector(
+            storage.prng.random(),
+            storage.options.replica_index.?,
+            zone,
+            offset_in_zone,
+            size,
+        );
+    }
 
-        // Randomly corrupt one of the faulty sectors the operation targeted.
-        // TODO: inject more realistic and varied storage faults as described above.
-        storage.fault_sector(zone, faulty_sectors.random(storage.prng.random()));
+    fn pick_faulty_chunk_offset(storage: *Storage, write: *const Write) ?u64 {
+        const atlas = storage.options.fault_atlas orelse return null;
+        return atlas.faulty_chunk_offset(
+            storage.prng.random(),
+            storage.options.replica_index.?,
+            write.zone,
+            write.buffer.len,
+        );
     }
 
     fn fault_sector(storage: *Storage, zone: vsr.Zone, sector: usize) void {
@@ -575,7 +721,14 @@ pub const Storage = struct {
         while (sector < sectors.max) : (sector += 1) {
             faulty = faulty or storage.faults.isSet(sector);
         }
-        return faulty;
+
+        var misdirected: bool = false;
+        var overlays = storage.overlays.iterate_const();
+        while (overlays.next()) |overlay| {
+            misdirected = misdirected or
+                (overlay.zone == area and overlay.offset == area.offset_in_zone());
+        }
+        return faulty or misdirected;
     }
 
     pub fn superblock_header(
@@ -719,45 +872,39 @@ pub const Storage = struct {
     pub fn transition_to_liveness_mode(storage: *Storage) void {
         storage.options.read_fault_probability = 0;
         storage.options.write_fault_probability = 0;
+        storage.options.write_misdirect_probability = 0;
         storage.options.crash_fault_probability = 0;
     }
 };
 
-pub const Area = union(enum) {
+pub const Area = union(vsr.Zone) {
     superblock: struct { copy: u8 },
     wal_headers: struct { sector: usize },
     wal_prepares: struct { slot: usize },
     client_replies: struct { slot: usize },
+    grid_padding,
     grid: struct { address: u64 },
 
-    fn sectors(area: Area) SectorRange {
+    fn offset_in_zone(area: Area) u64 {
         return switch (area) {
-            .superblock => |data| SectorRange.from_zone(
-                .superblock,
-                vsr.superblock.superblock_copy_size * @as(u64, data.copy),
-                vsr.superblock.superblock_copy_size,
-            ),
-            .wal_headers => |data| SectorRange.from_zone(
-                .wal_headers,
-                constants.sector_size * data.sector,
-                constants.sector_size,
-            ),
-            .wal_prepares => |data| SectorRange.from_zone(
-                .wal_prepares,
-                constants.message_size_max * data.slot,
-                constants.message_size_max,
-            ),
-            .client_replies => |data| SectorRange.from_zone(
-                .client_replies,
-                constants.message_size_max * data.slot,
-                constants.message_size_max,
-            ),
-            .grid => |data| SectorRange.from_zone(
-                .grid,
-                constants.block_size * (data.address - 1),
-                constants.block_size,
-            ),
+            .superblock => |data| vsr.superblock.superblock_copy_size * @as(u64, data.copy),
+            .wal_headers => |data| constants.sector_size * data.sector,
+            .wal_prepares => |data| constants.message_size_max * data.slot,
+            .client_replies => |data| constants.message_size_max * data.slot,
+            .grid_padding => unreachable,
+            .grid => |data| constants.block_size * (data.address - 1),
         };
+    }
+
+    fn sectors(area: Area) SectorRange {
+        return SectorRange.from_zone(area, area.offset_in_zone(), switch (area) {
+            .superblock => vsr.superblock.superblock_copy_size,
+            .wal_headers => constants.sector_size,
+            .wal_prepares => constants.message_size_max,
+            .client_replies => constants.message_size_max,
+            .grid_padding => unreachable,
+            .grid => constants.block_size,
+        });
     }
 };
 
@@ -806,7 +953,6 @@ const SectorRange = struct {
 /// We can't allow WAL storage faults for the same message in a majority of
 /// the replicas as that would make recovery impossible. Instead, we only
 /// allow faults in certain areas which differ between replicas.
-// TODO Support total superblock corruption, forcing a full state transfer.
 pub const ClusterFaultAtlas = struct {
     pub const Options = struct {
         faulty_superblock: bool,
@@ -818,34 +964,52 @@ pub const ClusterFaultAtlas = struct {
 
     const ReplicaSet = std.StaticBitSet(constants.replicas_max);
     const headers_per_sector = @divExact(constants.sector_size, @sizeOf(vsr.Header));
-    const header_sectors = @divExact(constants.journal_slot_count, headers_per_sector);
+    const members_max = constants.members_max;
 
-    const FaultyWALHeaders = std.StaticBitSet(@divExact(
-        constants.journal_size_headers,
-        constants.sector_size,
-    ));
-    const FaultyClientReplies = std.StaticBitSet(constants.clients_max);
-    const FaultyGridBlocks = std.StaticBitSet(Storage.grid_blocks_max);
-
-    options: Options,
-    faulty_wal_header_sectors: [constants.members_max]FaultyWALHeaders =
-        [_]FaultyWALHeaders{FaultyWALHeaders.initEmpty()} ** constants.members_max,
-    faulty_client_reply_slots: [constants.members_max]FaultyClientReplies =
-        [_]FaultyClientReplies{FaultyClientReplies.initEmpty()} ** constants.members_max,
+    faulty_wal_header_sectors: [members_max]std.DynamicBitSetUnmanaged,
+    faulty_client_reply_slots: [members_max]std.DynamicBitSetUnmanaged,
     /// Bit 0 corresponds to address 1.
-    faulty_grid_blocks: [constants.members_max]FaultyGridBlocks =
-        [_]FaultyGridBlocks{FaultyGridBlocks.initEmpty()} ** constants.members_max,
+    faulty_grid_blocks: [members_max]std.DynamicBitSetUnmanaged,
 
-    pub fn init(replica_count: u8, random: std.rand.Random, options: Options) ClusterFaultAtlas {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        replica_count: u8,
+        random: std.rand.Random,
+        options: Options,
+    ) !ClusterFaultAtlas {
         if (replica_count == 1) {
             // If there is only one replica in the cluster, WAL/Grid faults are not recoverable.
+            maybe(options.faulty_superblock);
             assert(!options.faulty_wal_headers);
             assert(!options.faulty_wal_prepares);
             assert(!options.faulty_client_replies);
             assert(!options.faulty_grid);
         }
 
-        var atlas = ClusterFaultAtlas{ .options = options };
+        // Currently these faulty areas are coupled together, so they should match.
+        assert(options.faulty_wal_headers == options.faulty_wal_prepares);
+
+        const fault_bitset_sizes = [3]u32{
+            @divExact(constants.journal_size_headers, constants.sector_size), // WAL headers.
+            constants.clients_max, // Client replies.
+            Storage.grid_blocks_max, // Grid.
+        };
+
+        var fault_bitsets_allocated: u32 = 0;
+        var fault_bitsets: [3 * members_max]std.DynamicBitSetUnmanaged = undefined;
+        errdefer for (fault_bitsets[0..fault_bitsets_allocated]) |*b| b.deinit(allocator);
+
+        for (&fault_bitsets, 0..) |*fault_bitset, i| {
+            const fault_bitset_size = fault_bitset_sizes[@divFloor(i, members_max)];
+            fault_bitset.* = try std.DynamicBitSetUnmanaged.initEmpty(allocator, fault_bitset_size);
+            fault_bitsets_allocated += 1;
+        }
+
+        var atlas = ClusterFaultAtlas{
+            .faulty_wal_header_sectors = fault_bitsets[0 * members_max ..][0..members_max].*,
+            .faulty_client_reply_slots = fault_bitsets[1 * members_max ..][0..members_max].*,
+            .faulty_grid_blocks = fault_bitsets[2 * members_max ..][0..members_max].*,
+        };
 
         const quorums = vsr.quorums(replica_count);
         const faults_max = quorums.replication - 1;
@@ -854,144 +1018,128 @@ pub const ClusterFaultAtlas = struct {
         assert(faults_max < quorums.view_change);
         assert(faults_max > 0 or replica_count == 1);
 
-        var sector: usize = 0;
-        while (sector < header_sectors) : (sector += 1) {
-            var wal_header_sector = ReplicaSet.initEmpty();
-            while (wal_header_sector.count() < faults_max) {
-                const replica_index = random.uintLessThan(u8, replica_count);
-                if (atlas.faulty_wal_header_sectors[replica_index].count() + 1 <
-                    atlas.faulty_wal_header_sectors[replica_index].capacity())
-                {
-                    atlas.faulty_wal_header_sectors[replica_index].set(sector);
-                    wal_header_sector.set(replica_index);
-                } else {
-                    // Don't add a fault to this replica, to avoid error.WALInvalid.
+        for ([_]struct { bool, *[members_max]std.DynamicBitSetUnmanaged }{
+            .{ options.faulty_wal_headers, &atlas.faulty_wal_header_sectors },
+            .{ options.faulty_client_replies, &atlas.faulty_client_reply_slots },
+            .{ options.faulty_grid, &atlas.faulty_grid_blocks },
+        }) |zone| {
+            const faulty = zone.@"0";
+            const chunks = zone.@"1";
+            if (!faulty) continue;
+
+            for (0..chunks[0].bit_length) |chunk| {
+                var replicas = ReplicaSet.initEmpty();
+                while (replicas.count() < faults_max) {
+                    const replica_index = random.uintLessThan(u8, replica_count);
+                    if (chunks[replica_index].count() + 1 <
+                        chunks[replica_index].capacity())
+                    {
+                        chunks[replica_index].set(chunk);
+                        replicas.set(replica_index);
+                    } else {
+                        // Never corrupt all chunks of a particular replica.
+                        // (For the WAL, this can cause error.WALInvalid).
+                    }
                 }
-            }
-        }
-
-        var block: usize = 0;
-        while (block < Storage.grid_blocks_max) : (block += 1) {
-            var replicas = std.StaticBitSet(constants.members_max).initEmpty();
-            while (replicas.count() < faults_max) {
-                replicas.set(random.uintLessThan(usize, replica_count));
-            }
-
-            var replicas_iterator = replicas.iterator(.{});
-            while (replicas_iterator.next()) |replica| {
-                atlas.faulty_grid_blocks[replica].set(block);
             }
         }
 
         return atlas;
     }
 
-    /// Returns a range of faulty sectors which intersect the specified range.
-    fn faulty_superblock(
-        atlas: *const ClusterFaultAtlas,
-        replica_index: usize,
-        offset_in_zone: u64,
-        size: u64,
-    ) ?SectorRange {
-        _ = replica_index;
-        _ = offset_in_zone;
-        _ = size;
-        if (!atlas.options.faulty_superblock) return null;
+    pub fn deinit(atlas: *ClusterFaultAtlas, allocator: std.mem.Allocator) void {
+        for (&atlas.faulty_grid_blocks) |*b| b.deinit(allocator);
+        for (&atlas.faulty_client_reply_slots) |*b| b.deinit(allocator);
+        for (&atlas.faulty_wal_header_sectors) |*b| b.deinit(allocator);
+    }
 
-        // Don't inject additional read/write faults into superblock headers.
-        // This prevents the quorum from being lost like so:
-        // - copy₀: B (ok)
-        // - copy₁: B (torn write)
-        // - copy₂: A (corrupt)
-        // - copy₃: A (ok)
-        // TODO Use hash-chaining to safely load copy₀, so that we can inject a superblock fault.
+    fn zone_chunks(atlas: *const ClusterFaultAtlas, zone: vsr.Zone) ?struct {
+        chunk_size: u32,
+        faulty: *const [members_max]std.DynamicBitSetUnmanaged,
+    } {
+        return switch (zone) {
+            // Don't inject additional read/write/misdirect faults into superblock headers.
+            // This prevents the quorum from being lost like so:
+            // - copy₀: B (ok)
+            // - copy₁: B (torn write)
+            // - copy₂: A (corrupt)
+            // - copy₃: A (ok)
+            // TODO Use hash-chaining to safely load copy₀, so that we can inject a superblock
+            // fault.
+            .superblock => null,
+            // We assert that the padding is never read, so there's no need to fault it.
+            .grid_padding => unreachable,
+
+            .wal_headers => .{
+                .chunk_size = constants.sector_size,
+                .faulty = &atlas.faulty_wal_header_sectors,
+            },
+            .wal_prepares => .{
+                .chunk_size = constants.message_size_max * headers_per_sector,
+                .faulty = &atlas.faulty_wal_header_sectors,
+            },
+            .client_replies => .{
+                .chunk_size = constants.message_size_max,
+                .faulty = &atlas.faulty_client_reply_slots,
+            },
+            .grid => .{
+                .chunk_size = constants.block_size,
+                .faulty = &atlas.faulty_grid_blocks,
+            },
+        };
+    }
+
+    /// Given a write of `size` bytes to the given zone, find an interesting offset within the same
+    /// zone to target. (If we want to drop the latter condition, an alternate implementation
+    /// strategy is: on random writes, perform the write successfully, but save the target
+    /// zone/offset/size. Then on a future random write, misdirect to a compatible saved location.)
+    fn faulty_chunk_offset(
+        atlas: *const ClusterFaultAtlas,
+        random: std.Random,
+        replica_index: u8,
+        zone: vsr.Zone,
+        size: u64,
+    ) ?u64 {
+        const chunks = atlas.zone_chunks(zone) orelse return null;
+
+        if (chunks.chunk_size < size) {
+            // When formatting the WAL, we may write many chunks simultaneously (to avoid a storm of
+            // tiny writes).
+            assert(zone == .wal_headers or zone == .wal_prepares);
+            assert(size % constants.sector_size == 0);
+            return null;
+        }
+
+        const chunks_faulty = &chunks.faulty[replica_index];
+        const chunk_count = chunks_faulty.bit_length;
+        const chunk_start = random.uintLessThan(usize, chunk_count);
+        for (0..chunk_count) |i| {
+            const chunk_index = (chunk_start + i) % chunk_count;
+            if (chunks_faulty.isSet(chunk_index)) {
+                // The chunk size of zone=wal_prepares is a multiple of the message_size_max, but
+                // misdirects in the wal_prepares zone always land on the first message of a chunk.
+                return chunk_index * chunks.chunk_size;
+            }
+        }
         return null;
     }
 
-    /// Returns a range of faulty sectors which intersect the specified range.
-    fn faulty_wal_headers(
+    fn faulty_sector(
         atlas: *const ClusterFaultAtlas,
-        replica_index: usize,
+        random: std.Random,
+        replica_index: u8,
+        zone: vsr.Zone,
         offset_in_zone: u64,
         size: u64,
-    ) ?SectorRange {
-        if (!atlas.options.faulty_wal_headers) return null;
-        return faulty_sectors(
-            FaultyWALHeaders.bit_length,
-            constants.sector_size,
-            .wal_headers,
-            &atlas.faulty_wal_header_sectors[replica_index],
-            offset_in_zone,
-            size,
-        );
-    }
+    ) ?usize {
+        const chunks = atlas.zone_chunks(zone) orelse return null;
 
-    /// Returns a range of faulty sectors which intersect the specified range.
-    fn faulty_wal_prepares(
-        atlas: *const ClusterFaultAtlas,
-        replica_index: usize,
-        offset_in_zone: u64,
-        size: u64,
-    ) ?SectorRange {
-        if (!atlas.options.faulty_wal_prepares) return null;
-        return faulty_sectors(
-            FaultyWALHeaders.bit_length,
-            constants.message_size_max * headers_per_sector,
-            .wal_prepares,
-            &atlas.faulty_wal_header_sectors[replica_index],
-            offset_in_zone,
-            size,
-        );
-    }
-
-    fn faulty_client_replies(
-        atlas: *const ClusterFaultAtlas,
-        replica_index: usize,
-        offset_in_zone: u64,
-        size: u64,
-    ) ?SectorRange {
-        if (!atlas.options.faulty_client_replies) return null;
-        return faulty_sectors(
-            constants.clients_max,
-            constants.message_size_max,
-            .client_replies,
-            &atlas.faulty_client_reply_slots[replica_index],
-            offset_in_zone,
-            size,
-        );
-    }
-
-    fn faulty_grid(
-        atlas: *const ClusterFaultAtlas,
-        replica_index: usize,
-        offset_in_zone: u64,
-        size: u64,
-    ) ?SectorRange {
-        if (!atlas.options.faulty_grid) return null;
-        return faulty_sectors(
-            Storage.grid_blocks_max,
-            constants.block_size,
-            .grid,
-            &atlas.faulty_grid_blocks[replica_index],
-            offset_in_zone,
-            size,
-        );
-    }
-
-    fn faulty_sectors(
-        comptime chunk_count: usize,
-        comptime chunk_size: usize,
-        comptime zone: vsr.Zone,
-        faulty_chunks: *const std.StaticBitSet(chunk_count),
-        offset_in_zone: u64,
-        size: u64,
-    ) ?SectorRange {
         var fault_start: ?usize = null;
         var fault_count: usize = 0;
 
-        var chunk: usize = @divFloor(offset_in_zone, chunk_size);
-        while (chunk * chunk_size < offset_in_zone + size) : (chunk += 1) {
-            if (faulty_chunks.isSet(chunk)) {
+        var chunk: usize = @divFloor(offset_in_zone, chunks.chunk_size);
+        while (chunk * chunks.chunk_size < offset_in_zone + size) : (chunk += 1) {
+            if (chunks.faulty[replica_index].isSet(chunk)) {
                 if (fault_start == null) fault_start = chunk;
                 fault_count += 1;
             } else {
@@ -1002,9 +1150,9 @@ pub const ClusterFaultAtlas = struct {
         if (fault_start) |start| {
             return SectorRange.from_zone(
                 zone,
-                chunk_size * start,
-                chunk_size * fault_count,
-            ).intersect(SectorRange.from_zone(zone, offset_in_zone, size)).?;
+                chunks.chunk_size * start,
+                chunks.chunk_size * fault_count,
+            ).intersect(SectorRange.from_zone(zone, offset_in_zone, size)).?.random(random);
         } else {
             return null;
         }

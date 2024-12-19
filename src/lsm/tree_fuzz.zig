@@ -851,13 +851,14 @@ pub fn main(fuzz_args: fuzz.FuzzArgs) !void {
     const table_usage = random.enumValue(TableUsage);
     log.info("table_usage={}", .{table_usage});
 
-    const storage_fault_atlas = ClusterFaultAtlas.init(3, random, .{
+    var storage_fault_atlas = try ClusterFaultAtlas.init(allocator, 3, random, .{
         .faulty_superblock = false,
         .faulty_wal_headers = false,
         .faulty_wal_prepares = false,
         .faulty_client_replies = false,
         .faulty_grid = true,
     });
+    defer storage_fault_atlas.deinit(allocator);
 
     const storage_options = .{
         .seed = random.int(u64),

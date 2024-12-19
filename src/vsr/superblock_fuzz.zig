@@ -43,13 +43,14 @@ fn run_fuzz(allocator: std.mem.Allocator, seed: u64, transitions_count_total: us
     var prng = std.rand.DefaultPrng.init(seed);
     const random = prng.random();
 
-    const storage_fault_atlas = StorageFaultAtlas.init(1, random, .{
+    var storage_fault_atlas = try StorageFaultAtlas.init(allocator, 1, random, .{
         .faulty_superblock = true,
         .faulty_wal_headers = false,
         .faulty_wal_prepares = false,
         .faulty_client_replies = false,
         .faulty_grid = false,
     });
+    defer storage_fault_atlas.deinit(allocator);
 
     const storage_options = .{
         .replica_index = 0,
