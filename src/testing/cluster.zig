@@ -719,12 +719,14 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
             user_data: u128,
             operation: StateMachine.Operation,
             timestamp: u64,
-            result: []u8,
+            result: []const u8,
+            batch_count: u16,
         ) void {
             _ = user_data;
             _ = operation;
             _ = timestamp;
             _ = result;
+            _ = batch_count;
         }
 
         fn client_on_reply(

@@ -670,6 +670,7 @@ const Benchmark = struct {
             }),
             operation,
             payload,
+            0,
         );
     }
 
@@ -677,8 +678,10 @@ const Benchmark = struct {
         user_data: u128,
         operation: StateMachine.Operation,
         timestamp: u64,
-        result: []u8,
+        result: []const u8,
+        batch_count: u16,
     ) void {
+        assert(batch_count == 0);
         const context: RequestContext = @bitCast(user_data);
         const client = context.client_index;
         const b: *Benchmark = context.benchmark;

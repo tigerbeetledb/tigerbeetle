@@ -223,17 +223,12 @@ fn request(
     };
 
     packet.* = .{
-        .next = undefined,
         .user_data = callback_ref,
         .operation = @intFromEnum(operation),
-        .status = undefined,
         .data_size = @intCast(packet_data.len),
         .data = packet_data.ptr,
-        .batch_next = undefined,
-        .batch_tail = undefined,
-        .batch_size = undefined,
-        .batch_allowed = undefined,
-        .reserved = undefined,
+        .next = undefined,
+        .status = undefined,
     };
 
     tb_client.submit(client, packet);

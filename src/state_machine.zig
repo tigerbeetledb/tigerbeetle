@@ -125,7 +125,6 @@ pub fn StateMachineType(
         };
 
         /// Used to determine if an operation can be batched at the VSR layer.
-        /// If so, the StateMachine must support demuxing batched operations below.
         pub const batch_logical_allowed = std.enums.EnumArray(Operation, bool).init(.{
             .pulse = false,
             .create_accounts = true,
@@ -138,52 +137,6 @@ pub fn StateMachineType(
             .query_accounts = false,
             .query_transfers = false,
         });
-
-        pub fn DemuxerType(comptime operation: Operation) type {
-            assert(@bitSizeOf(EventType(operation)) > 0);
-            assert(@bitSizeOf(ResultType(operation)) > 0);
-
-            return struct {
-                const Demuxer = @This();
-                const DemuxerResult = ResultType(operation);
-
-                results: []DemuxerResult,
-
-                /// Create a Demuxer which can extract Results out of the reply bytes in-place.
-                /// Bytes must be aligned to hold Results (normally originating from message).
-                pub fn init(reply: []u8) Demuxer {
-                    return Demuxer{ .results = @alignCast(mem.bytesAsSlice(DemuxerResult, reply)) };
-                }
-
-                /// Returns a slice of bytes in the original reply with Results matching the Event
-                /// range (offset and size). Each subsequent call to demux() must have ranges that
-                /// are disjoint and increase monotonically.
-                pub fn decode(self: *Demuxer, event_offset: u32, event_count: u32) []u8 {
-                    const demuxed = blk: {
-                        if (comptime batch_logical_allowed.get(operation)) {
-                            // Count all results from out slice which match the Event range,
-                            // updating the result.indexes to be related to the EVent in the
-                            // process.
-                            for (self.results, 0..) |*result, i| {
-                                if (result.index < event_offset) break :blk i;
-                                if (result.index >= event_offset + event_count) break :blk i;
-                                result.index -= event_offset;
-                            }
-                        } else {
-                            // Operations which aren't batched have the first Event consume the
-                            // entire Result down below.
-                            assert(event_offset == 0);
-                        }
-                        break :blk self.results.len;
-                    };
-
-                    // Return all results demuxed from the given Event, re-slicing them out of
-                    // self.results to "consume" them from subsequent decode() calls.
-                    defer self.results = self.results[demuxed..];
-                    return mem.sliceAsBytes(self.results[0..demuxed]);
-                }
-            };
-        }
 
         const batch_value_count_max = batch_value_counts_limit(config.message_body_size_max);
 
@@ -724,35 +677,25 @@ pub fn StateMachineType(
                     else
                         .{ @sizeOf(AccountFilter), @alignOf(AccountFilter) };
 
+                    if (input.len != event_size) return false;
                     if (!std.mem.isAligned(@intFromPtr(input.ptr), alignment)) {
                         log.info("Invalid input alignment for {s}", .{
                             @tagName(operation),
                         });
                         return false;
                     }
-                    if (input.len != event_size) return false;
                 },
                 .query_accounts, .query_transfers => {
-                    const alignment = @alignOf(QueryFilter);
-                    if (!std.mem.isAligned(@intFromPtr(input.ptr), alignment)) {
+                    if (input.len != @sizeOf(QueryFilter)) return false;
+                    if (!std.mem.isAligned(@intFromPtr(input.ptr), @alignOf(QueryFilter))) {
                         log.info("Invalid input alignment for {s}", .{
                             @tagName(operation),
                         });
                         return false;
                     }
-
-                    if (input.len != @sizeOf(QueryFilter)) return false;
                 },
                 inline else => |comptime_operation| {
                     const Event = EventType(comptime_operation);
-
-                    const alignment = @alignOf(Event);
-                    if (!std.mem.isAligned(@intFromPtr(input.ptr), alignment)) {
-                        log.info("Invalid input alignment for {s}", .{
-                            @tagName(operation),
-                        });
-                        return false;
-                    }
 
                     const event_size = @sizeOf(Event);
                     comptime assert(event_size > 0);
@@ -767,6 +710,14 @@ pub fn StateMachineType(
 
                     if (input.len % event_size != 0) return false;
                     if (input.len > batch_limit * event_size) return false;
+                    if (input.len > 0 and
+                        !std.mem.isAligned(@intFromPtr(input.ptr), @alignOf(Event)))
+                    {
+                        log.info("Invalid input alignment for {s}", .{
+                            @tagName(operation),
+                        });
+                        return false;
+                    }
                 },
             }
 
@@ -6136,60 +6087,6 @@ test "StateMachine: input_valid" {
             event.operation,
             input[0 .. 3 * (event.size / 2)],
         ));
-    }
-}
-
-test "StateMachine: Demuxer" {
-    const StateMachine = StateMachineType(
-        @import("testing/storage.zig").Storage,
-        global_constants.state_machine_config,
-    );
-
-    var prng = std.rand.DefaultPrng.init(42);
-    inline for ([_]StateMachine.Operation{
-        .create_accounts,
-        .create_transfers,
-    }) |operation| {
-        try expect(StateMachine.batch_logical_allowed.get(operation));
-
-        const Result = StateMachine.ResultType(operation);
-        var results: [@divExact(global_constants.message_body_size_max, @sizeOf(Result))]Result =
-            undefined;
-
-        for (0..100) |_| {
-            // Generate Result errors to Events at random.
-            var reply_len: u32 = 0;
-            for (0..results.len) |i| {
-                if (prng.random().boolean()) {
-                    results[reply_len] = .{ .index = @intCast(i), .result = .ok };
-                    reply_len += 1;
-                }
-            }
-
-            // Demux events of random strides from the generated results.
-            var demuxer = StateMachine.DemuxerType(operation)
-                .init(mem.sliceAsBytes(results[0..reply_len]));
-            const event_count: u32 = @intCast(@max(
-                1,
-                prng.random().uintAtMost(usize, results.len),
-            ));
-            var event_offset: u32 = 0;
-            while (event_offset < event_count) {
-                const event_size = @max(
-                    1,
-                    prng.random().uintAtMost(u32, event_count - event_offset),
-                );
-                const reply: []Result = @alignCast(
-                    mem.bytesAsSlice(Result, demuxer.decode(event_offset, event_size)),
-                );
-                defer event_offset += event_size;
-
-                for (reply) |*result| {
-                    try expectEqual(result.result, .ok);
-                    try expect(result.index < event_offset + event_size);
-                }
-            }
-        }
     }
 }
 

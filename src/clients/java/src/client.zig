@@ -128,17 +128,12 @@ const NativeClient = struct {
         const global_ref = JNIHelper.new_global_reference(env, request_obj);
 
         packet.* = .{
-            .next = undefined,
             .user_data = global_ref,
             .operation = operation,
-            .status = undefined,
             .data_size = @intCast(send_buffer.len),
             .data = send_buffer.ptr,
-            .batch_next = undefined,
-            .batch_tail = undefined,
-            .batch_size = undefined,
-            .batch_allowed = undefined,
-            .reserved = undefined,
+            .next = undefined,
+            .status = undefined,
         };
 
         tb.submit(context.client, packet);
