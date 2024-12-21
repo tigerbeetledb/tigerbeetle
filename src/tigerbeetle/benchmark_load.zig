@@ -76,6 +76,7 @@ pub fn main(
     var io = try IO.init(32, 0);
 
     var message_pool = try MessagePool.init(allocator, .client);
+    defer message_pool.deinit(allocator);
 
     std.log.info("Benchmark running against {any}", .{addresses});
 
@@ -92,6 +93,7 @@ pub fn main(
             },
         },
     );
+    defer client.deinit(allocator);
 
     var batch_accounts =
         try std.ArrayListUnmanaged(tb.Account).initCapacity(allocator, cli_args.account_batch_size);

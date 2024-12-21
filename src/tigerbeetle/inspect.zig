@@ -189,7 +189,6 @@ const Inspector = struct {
         std.posix.close(inspector.fd);
         std.posix.close(inspector.dir_fd);
         inspector.allocator.destroy(inspector);
-        inspector.* = undefined;
     }
 
     fn work(inspector: *Inspector) !void {

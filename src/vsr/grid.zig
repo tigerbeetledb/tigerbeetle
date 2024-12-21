@@ -172,6 +172,7 @@ pub fn GridType(comptime Storage: type) type {
         cache: Cache,
         /// Each entry in cache has a corresponding block.
         cache_blocks: []BlockPtr,
+        cache_blocks_backing: [][constants.block_size]u8,
 
         write_iops: IOPSType(WriteIOP, write_iops_max) = .{},
         write_queue: FIFOType(Write) = .{ .name = "grid_write" },
@@ -234,11 +235,19 @@ pub fn GridType(comptime Storage: type) type {
             const cache_blocks = try allocator.alloc(BlockPtr, options.cache_blocks_count);
             errdefer allocator.free(cache_blocks);
 
+            // The layer of indirection is currently needed due to how the grid consumes blocks when
+            // writing them.
+            const cache_blocks_backing = try allocator.alignedAlloc(
+                [constants.block_size]u8,
+                constants.sector_size,
+                options.cache_blocks_count,
+            );
+            errdefer allocator.free(cache_blocks_backing);
+            @memset(std.mem.asBytes(cache_blocks_backing), 0);
+
             for (cache_blocks, 0..) |*cache_block, i| {
-                errdefer for (cache_blocks[0..i]) |block| allocator.free(block);
-                cache_block.* = try allocate_block(allocator);
+                cache_block.* = &cache_blocks_backing[i];
             }
-            errdefer for (cache_blocks) |block| allocator.free(block);
 
             var cache = try Cache.init(allocator, options.cache_blocks_count, .{ .name = "grid" });
             errdefer cache.deinit(allocator);
@@ -259,6 +268,7 @@ pub fn GridType(comptime Storage: type) type {
                 .blocks_missing = blocks_missing,
                 .cache = cache,
                 .cache_blocks = cache_blocks,
+                .cache_blocks_backing = cache_blocks_backing,
                 .read_iop_blocks = read_iop_blocks,
             };
         }
@@ -266,7 +276,7 @@ pub fn GridType(comptime Storage: type) type {
         pub fn deinit(grid: *Grid, allocator: mem.Allocator) void {
             for (&grid.read_iop_blocks) |block| allocator.free(block);
 
-            for (grid.cache_blocks) |block| allocator.free(block);
+            allocator.free(grid.cache_blocks_backing);
             allocator.free(grid.cache_blocks);
 
             grid.cache.deinit(allocator);

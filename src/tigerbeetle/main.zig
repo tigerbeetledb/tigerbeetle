@@ -55,10 +55,10 @@ pub const std_options = .{
 pub fn main() !void {
     try SigIllHandler.register();
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer assert(gpa.deinit() == .ok);
 
-    const allocator = arena.allocator();
+    const allocator = gpa.allocator();
 
     var arg_iterator = try std.process.argsWithAllocator(allocator);
     defer arg_iterator.deinit();
@@ -76,10 +76,10 @@ pub fn main() !void {
             if (args.log_debug) {
                 log_level_runtime = .debug;
             }
-            try Command.start(arena.allocator(), args);
+            try Command.start(allocator, args);
         },
         .version => |*args| try Command.version(allocator, args.verbose),
-        .repl => |*args| try Command.repl(arena.allocator(), args),
+        .repl => |*args| try Command.repl(allocator, args),
         .benchmark => |*args| try benchmark_driver.main(allocator, args),
         .inspect => |*args| inspect.main(allocator, args) catch |err| {
             // Ignore BrokenPipe so that e.g. "tigerbeetle inspect ... | head -n12" succeeds.
@@ -393,6 +393,7 @@ const Command = struct {
             error.NoAddress => vsr.fatal(.cli, "all --addresses must be provided", .{}),
             else => |e| return e,
         };
+        defer replica.deinit(allocator);
 
         if (multiversion != null) {
             if (args.development) {
