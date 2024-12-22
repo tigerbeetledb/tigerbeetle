@@ -124,20 +124,6 @@ pub fn StateMachineType(
             };
         };
 
-        /// Used to determine if an operation can be batched at the VSR layer.
-        pub const batch_logical_allowed = std.enums.EnumArray(Operation, bool).init(.{
-            .pulse = false,
-            .create_accounts = true,
-            .create_transfers = true,
-            // Don't batch lookups/queries for now.
-            .lookup_accounts = false,
-            .lookup_transfers = false,
-            .get_account_transfers = false,
-            .get_account_balances = false,
-            .query_accounts = false,
-            .query_transfers = false,
-        });
-
         const batch_value_count_max = batch_value_counts_limit(config.message_body_size_max);
 
         const AccountsGroove = GrooveType(
@@ -394,6 +380,33 @@ pub fn StateMachineType(
                 .get_account_balances => "filter",
                 .query_accounts => "query_filter",
                 .query_transfers => "query_filter",
+            };
+        }
+
+        pub fn event_size_bytes(
+            client_release: vsr.Release,
+            operation: Operation,
+        ) usize {
+            return switch (operation) {
+                .pulse => unreachable,
+                .get_account_transfers,
+                .get_account_balances,
+                => if (AccountFilterFormer.required(client_release))
+                    @sizeOf(AccountFilterFormer)
+                else
+                    @sizeOf(AccountFilter),
+                inline else => |comptime_operation| @sizeOf(EventType(comptime_operation)),
+            };
+        }
+
+        pub fn result_size_bytes(
+            client_release: vsr.Release,
+            operation: Operation,
+        ) usize {
+            _ = client_release;
+            return switch (operation) {
+                .pulse => unreachable,
+                inline else => |comptime_operation| @sizeOf(ResultType(comptime_operation)),
             };
         }
 
@@ -696,20 +709,20 @@ pub fn StateMachineType(
                 },
                 inline else => |comptime_operation| {
                     const Event = EventType(comptime_operation);
+                    comptime assert(@sizeOf(Event) > 0);
 
-                    const event_size = @sizeOf(Event);
-                    comptime assert(event_size > 0);
-
-                    const batch_limit: u32 =
-                        operation_batch_max(comptime_operation, self.batch_size_limit);
+                    const batch_limit: u32 = operation_batch_max(
+                        comptime_operation,
+                        self.batch_size_limit,
+                    );
                     assert(batch_limit > 0);
 
                     // Clients do not validate batch size == 0,
                     // and even the simulator can generate requests with no events.
                     maybe(input.len == 0);
 
-                    if (input.len % event_size != 0) return false;
-                    if (input.len > batch_limit * event_size) return false;
+                    if (input.len % @sizeOf(Event) != 0) return false;
+                    if (input.len > batch_limit * @sizeOf(Event)) return false;
                     if (input.len > 0 and
                         !std.mem.isAligned(@intFromPtr(input.ptr), @alignOf(Event)))
                     {
@@ -724,17 +737,18 @@ pub fn StateMachineType(
             return true;
         }
 
-        /// Updates `prepare_timestamp` to the highest timestamp of the response.
-        pub fn prepare(
+        /// Returns the logical time increment (in nanoseconds) for the highest
+        /// timestamp of the response.
+        pub fn prepare_nanoseconds(
             self: *StateMachine,
             client_release: vsr.Release,
             operation: Operation,
             input: []const u8,
-        ) void {
+        ) u64 {
             assert(self.input_valid(client_release, operation, input));
             assert(input.len <= self.batch_size_limit);
 
-            self.prepare_timestamp += switch (operation) {
+            return switch (operation) {
                 .pulse => 0,
                 .create_accounts => @divExact(input.len, @sizeOf(Account)),
                 .create_transfers => @divExact(input.len, @sizeOf(Transfer)),
@@ -1607,8 +1621,11 @@ pub fn StateMachineType(
             _ = client;
             assert(op != 0);
             assert(self.input_valid(client_release, operation, input));
-            assert(timestamp > self.commit_timestamp or global_constants.aof_recovery);
             assert(input.len <= self.batch_size_limit);
+            assert(timestamp > self.commit_timestamp or
+                // In case of empty batches, the timestamp may be the same as the last commit.
+                (timestamp == self.commit_timestamp and input.len == 0) or
+                global_constants.aof_recovery);
 
             maybe(self.scan_lookup_result_count != null);
             defer assert(self.scan_lookup_result_count == null);
@@ -3101,9 +3118,14 @@ pub fn StateMachineType(
             };
         }
 
+        // TODO: This function may need to accept the client's `release` to maintain backward
+        // compatibility.
         pub fn operation_batch_max(comptime operation: Operation, batch_size_limit: u32) u32 {
             assert(batch_size_limit <= constants.message_body_size_max);
 
+            // TODO: Improve this logic for handling operations with asymmetrical events and
+            // results, such as queries where a single query filter event can return up to
+            // `limit` results.
             const event_size = @sizeOf(EventType(operation));
             const result_size = @sizeOf(ResultType(operation));
             comptime assert(event_size > 0);
@@ -4051,8 +4073,9 @@ fn check(test_table: []const u8) !void {
                 defer allocator.free(reply_actual_buffer);
 
                 context.state_machine.commit_timestamp = context.state_machine.prepare_timestamp;
-                context.state_machine.prepare_timestamp += 1;
-                context.state_machine.prepare(
+                // Add 1 to bump the timestamp even for read-only requests.
+                context.state_machine.prepare_timestamp += 1 +
+                    context.state_machine.prepare_nanoseconds(
                     context.client_release,
                     commit_operation,
                     request.items,

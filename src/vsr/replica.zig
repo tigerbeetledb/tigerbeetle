@@ -27,6 +27,8 @@ const Command = vsr.Command;
 const Version = vsr.Version;
 const SyncStage = vsr.SyncStage;
 const ClientSessions = vsr.ClientSessions;
+const BatchDecoder = vsr.BatchDecoder;
+const BatchEncoder = vsr.BatchEncoder;
 
 const log = marks.wrap_log(stdx.log.scoped(.replica));
 
@@ -4183,13 +4185,31 @@ pub fn ReplicaType(
             }
 
             if (StateMachine.operation_from_vsr(prepare.header.operation)) |prepare_operation| {
+                const body: []const u8 = body: {
+                    if (prepare.header.batch_count == 0) break :body prepare.body_used();
+
+                    // If it's a batched request, the message body must be decoded to
+                    // remove the trailer.
+                    // The `prefech` can process all batches at once.
+                    const event_size = StateMachine.event_size_bytes(
+                        prepare.header.release,
+                        prepare_operation,
+                    );
+                    const decoder = BatchDecoder.init(
+                        event_size,
+                        prepare.body_used(),
+                        prepare.header.batch_count,
+                    );
+
+                    break :body decoder.payload;
+                };
                 self.state_machine.prefetch_timestamp = prepare.header.timestamp;
                 self.state_machine.prefetch(
                     commit_prefetch_callback,
                     prepare.header.release,
                     prepare.header.op,
                     prepare_operation,
-                    prepare.body_used(),
+                    body,
                 );
                 return .pending;
             } else {
@@ -4684,15 +4704,80 @@ pub fn ReplicaType(
                     reply.buffer[@sizeOf(Header)..],
                 ),
                 .upgrade => self.execute_op_upgrade(prepare, reply.buffer[@sizeOf(Header)..]),
-                else => self.state_machine.commit(
-                    prepare.header.client,
-                    prepare.header.release,
-                    prepare.header.op,
-                    prepare.header.timestamp,
-                    prepare.header.operation.cast(StateMachine),
-                    prepare.body_used(),
-                    reply.buffer[@sizeOf(Header)..],
-                ),
+                else => reply_body_size: {
+                    const operation = prepare.header.operation.cast(StateMachine);
+                    if (prepare.header.batch_count == 0) {
+                        // No batching required, commiting the entire payload at once.
+                        const bytes_written = self.state_machine.commit(
+                            prepare.header.client,
+                            prepare.header.release,
+                            prepare.header.op,
+                            prepare.header.timestamp,
+                            operation,
+                            prepare.body_used(),
+                            reply.buffer[@sizeOf(Header)..],
+                        );
+                        break :reply_body_size bytes_written;
+                    } else {
+                        var body_decoder = BatchDecoder.init(
+                            StateMachine.event_size_bytes(prepare.header.release, operation),
+                            prepare.body_used(), // The message's with the trailer.
+                            prepare.header.batch_count,
+                        );
+                        var reply_encoder = BatchEncoder.init(
+                            StateMachine.result_size_bytes(prepare.header.release, operation),
+                            reply.buffer[@sizeOf(Header)..],
+                        );
+
+                        var prepare_timestamp: u64 = prepare.header.timestamp -
+                            self.state_machine.prepare_nanoseconds(
+                            prepare.header.release,
+                            operation,
+                            body_decoder.payload, // The entire message's body without the trailer.
+                        );
+                        log.debug(
+                            "{}: execute_op: batch_count={} operation={s}",
+                            .{ self.replica, prepare.header.batch_count, @tagName(operation) },
+                        );
+
+                        while (body_decoder.next()) |batch| {
+                            // Commit each batched set of events
+                            // using the timestamp of the highest result of the response.
+                            prepare_timestamp += self.state_machine.prepare_nanoseconds(
+                                prepare.header.release,
+                                operation,
+                                batch, // The batch's body.
+                            );
+                            const bytes_written = self.state_machine.commit(
+                                prepare.header.client,
+                                prepare.header.release,
+                                prepare.header.op,
+                                prepare_timestamp,
+                                operation,
+                                batch,
+                                reply_encoder.writable(),
+                            );
+                            reply_encoder.add(bytes_written);
+
+                            log.debug(
+                                "{}: execute_op: batch={} elements={} " ++
+                                    "prepare_timestamp={} commit_timestamp={}",
+                                .{
+                                    self.replica,
+                                    reply_encoder.batch_count,
+                                    @divExact(batch.len, body_decoder.element_size),
+                                    prepare_timestamp,
+                                    self.state_machine.commit_timestamp,
+                                },
+                            );
+                        }
+                        reply_encoder.finish();
+                        assert(reply_encoder.batch_count == prepare.header.batch_count);
+                        assert(prepare_timestamp == prepare.header.timestamp);
+
+                        break :reply_body_size reply_encoder.bytes_written;
+                    }
+                },
             };
 
             assert(self.state_machine.commit_timestamp <= prepare.header.timestamp or
@@ -4730,7 +4815,7 @@ pub fn ReplicaType(
                 .timestamp = prepare.header.timestamp,
                 .commit = prepare.header.op,
                 .size = @sizeOf(Header) + @as(u32, @intCast(reply_body_size)),
-                .batch_count = 0,
+                .batch_count = prepare.header.batch_count,
             };
             assert(reply.header.epoch == 0);
 
@@ -6388,10 +6473,30 @@ pub fn ReplicaType(
                     }
                 },
                 else => {
-                    self.state_machine.prepare(
+                    const operation = request.message.header.operation.cast(StateMachine);
+                    const body: []const u8 = body: {
+                        if (request.message.header.batch_count == 0) {
+                            break :body request.message.body_used();
+                        }
+
+                        // If it's a batched request, the message body must be decoded to
+                        // remove the trailer.
+                        const event_size = StateMachine.event_size_bytes(
+                            request.message.header.release,
+                            operation,
+                        );
+                        const decoder = BatchDecoder.init(
+                            event_size,
+                            request.message.body_used(),
+                            request.message.header.batch_count,
+                        );
+
+                        break :body decoder.payload;
+                    };
+                    self.state_machine.prepare_timestamp += self.state_machine.prepare_nanoseconds(
                         request.message.header.release,
-                        request.message.header.operation.cast(StateMachine),
-                        request.message.body_used(),
+                        operation,
+                        body,
                     );
                 },
             }
@@ -6437,7 +6542,7 @@ pub fn ReplicaType(
                 },
                 .request = request_header.request,
                 .operation = request_header.operation,
-                .batch_count = 0,
+                .batch_count = request_header.batch_count,
             };
             message.header.set_checksum_body(message.body_used());
             message.header.set_checksum();

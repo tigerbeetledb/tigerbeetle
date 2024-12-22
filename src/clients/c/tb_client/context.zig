@@ -15,6 +15,9 @@ const Header = vsr.Header;
 const IO = vsr.io.IO;
 const message_pool = vsr.message_pool;
 
+const BatchEncoder = vsr.BatchEncoder;
+const BatchDecoder = vsr.BatchDecoder;
+
 const MessagePool = message_pool.MessagePool;
 const Message = MessagePool.Message;
 const Packet = @import("packet.zig").Packet;
@@ -249,13 +252,6 @@ pub fn ContextType(
             self.allocator.destroy(self);
         }
 
-        pub fn tick(self: *Context) void {
-            // `Tick` is invoked by the result callback that may have arrived during shutdown.
-            if (self.state.load(.acquire) == .running) {
-                self.client.tick();
-            }
-        }
-
         pub fn io_thread(self: *Context) void {
             while (!self.signal.stop_requested()) {
                 self.client.tick();
@@ -268,40 +264,41 @@ pub fn ContextType(
                 };
             }
 
-            // Cancel the request_inflight packet if any.
-            if (self.client.request_inflight) |*inflight| {
-                if (inflight.message.header.operation != .register) {
-                    const user_data: UserData = @bitCast(inflight.user_data);
-                    self.cancel(user_data.packet);
+            // Cancelling any inflight or queued request.
+            var packet_list: ?*Packet = packet_list: {
+                if (self.client.request_inflight) |*inflight| {
+                    if (inflight.message.header.operation != .register) {
+                        const user_data: UserData = @bitCast(inflight.user_data);
+                        // Cancel the request_inflight packet if any.
+                        break :packet_list user_data.packet;
+                    }
                 }
-            }
 
-            while (self.submitted.pop()) |packet| {
+                break :packet_list self.submitted.flush();
+            };
+            while (packet_list) |packet| {
+                packet_list = packet.next orelse self.submitted.flush();
+                packet.next = null;
                 self.cancel(packet);
             }
         }
 
         /// Submit the enqueued requests through the vsr client.
         /// Always called by the io thread.
-        fn submit(self: *Context, packet: *Packet) void {
+        fn submit(self: *Context, packet_list: *Packet) void {
             assert(self.batch_size_limit != null);
             assert(self.client.request_inflight == null);
-            assert(packet.next == null);
 
-            const message = self.client.get_message().build(.request);
-            defer self.client.release_message(message.base());
-
-            // The batching logic will be inserted here:
-            const head: *Packet, const bytes_written: usize, const batch_count: u16 = blk: {
-                if (!self.packet_valid(packet)) {
-                    // Packet failed, nothing to send.
-                    self.signal.notify();
-                    return;
+            // Find a valid packet to start the batch.
+            const head: *Packet = head: {
+                var it: ?*Packet = packet_list;
+                while (it) |packet| {
+                    it = packet.next;
+                    if (self.packet_valid(packet)) break :head packet;
                 }
-
-                const event_data = packet.events();
-                stdx.copy_disjoint(.inexact, u8, message.buffer[@sizeOf(Header)..], event_data);
-                break :blk .{ packet, event_data.len, 0 };
+                // Nothing to send.
+                self.signal.notify();
+                return;
             };
 
             const operation: StateMachine.Operation = operation_from_int(head.operation).?;
@@ -310,14 +307,89 @@ pub fn ContextType(
                 .pulse => unreachable,
                 inline else => |operation_comptime| blk: {
                     const event_size = @sizeOf(StateMachine.EventType(operation_comptime));
-                    const events_batch_max = StateMachine.operation_batch_max(
-                        operation_comptime,
-                        self.batch_size_limit.?,
-                    );
+                    const events_batch_max = if (StateMachine.event_is_slice(operation))
+                        StateMachine.operation_batch_max(
+                            operation_comptime,
+                            self.batch_size_limit.?,
+                        )
+                    else
+                        1;
 
                     break :blk .{ event_size, events_batch_max };
                 },
             };
+            assert(self.batch_size_limit.? >= event_size * events_batch_max);
+
+            const message = self.client.get_message().build(.request);
+            defer self.client.release_message(message.base());
+
+            var encoder = BatchEncoder.init(
+                event_size,
+                message.buffer[@sizeOf(Header)..][0 .. event_size * events_batch_max],
+            );
+
+            // Whether to batch this packet with others in the same request,
+            // or send it on it's own message.
+            const is_batchable = head.next != null and
+                StateMachine.event_is_slice(operation) and
+                encoder.can_add(head.events().len);
+
+            const bytes_written: usize, const batch_count: u16 = if (is_batchable) blk: {
+
+                // ********************************************************************************
+                // NOTE: This algorithm iterates over the linked list in O(n) time for each request
+                // and is susceptible to starvation, as it reorders packets when returning them to
+                // the queue. It's merely an attempt to remove the batch-specific linked list
+                // fields from `Packet`.
+                // ********************************************************************************
+
+                // Encoding the first packet into the batch:
+                stdx.copy_disjoint(.inexact, u8, encoder.writable(), head.events());
+                encoder.add(head.events().len);
+
+                // Iterating for other packets with the same `operation` that might be sent together
+                // in the same message.
+                var it: ?*Packet = head.next;
+                var packet_tail = head;
+                packet_tail.next = null;
+                while (it) |batch| {
+                    it = batch.next;
+                    if (!self.packet_valid(batch)) continue;
+
+                    if (batch.operation == head.operation and
+                        encoder.can_add(batch.events().len))
+                    {
+                        const event_data = batch.events();
+                        stdx.copy_disjoint(.inexact, u8, encoder.writable(), event_data);
+                        encoder.add(event_data.len);
+
+                        packet_tail.next = batch;
+                        batch.next = null;
+                        packet_tail = batch;
+                    } else {
+                        // There's no room for this packet, returning it to the queue,
+                        // it will be sent next time.
+                        self.submitted.push(batch);
+                    }
+                }
+                encoder.finish();
+
+                break :blk .{ encoder.bytes_written, encoder.batch_count };
+            } else blk: {
+                var it: ?*Packet = head.next;
+                head.next = null;
+                while (it) |batch| {
+                    it = batch.next;
+                    if (self.packet_valid(batch)) {
+                        self.submitted.push(batch);
+                    }
+                }
+
+                const event_data = head.events();
+                stdx.copy_disjoint(.inexact, u8, message.buffer[@sizeOf(Header)..], event_data);
+                break :blk .{ event_data.len, 0 };
+            };
+            assert(batch_count == 0 or is_batchable);
             assert(bytes_written % event_size == 0);
             assert(bytes_written <= events_batch_max * event_size);
 
@@ -346,10 +418,10 @@ pub fn ContextType(
         /// When the result is `false` then `packet: *Packet` isn't valid anymore.
         fn packet_valid(self: *Context, packet: *Packet) bool {
             assert(packet.status == .ok);
-            assert(packet.user_data != null);
             assert(packet.data != null or packet.data_size == 0);
             assert(stdx.zeroed(&packet.reserved));
-            assert(packet.next == null);
+            maybe(packet.next == null);
+            maybe(packet.user_data == null);
 
             const operation: StateMachine.Operation = operation_from_int(packet.operation) orelse {
                 self.notify_completion(packet, error.InvalidOperation);
@@ -465,8 +537,8 @@ pub fn ContextType(
 
             // Submit the next pending packet (if any) now that VSR has completed this one.
             assert(self.client.request_inflight == null);
-            if (self.submitted.pop()) |packet_next| {
-                self.submit(packet_next);
+            if (self.submitted.flush()) |packet_list| {
+                self.submit(packet_list);
             }
 
             // `StateMachine.result_size_bytes` is intended for use on the replica side,
@@ -479,14 +551,31 @@ pub fn ContextType(
             } else unreachable;
 
             assert(result_size % result_size == 0);
-            // Implement batching decode here, using
-            // the linked list and batch_count.
-            assert(packet.next == null);
-            assert(batch_count == 0);
-            self.notify_completion(packet, .{
-                .timestamp = timestamp,
-                .reply = reply,
-            });
+            if (batch_count == 0) {
+                assert(packet.next == null);
+                self.notify_completion(packet, .{
+                    .timestamp = timestamp,
+                    .reply = reply,
+                });
+            } else {
+                assert(batch_count > 1 or packet.next == null);
+                var decoder = BatchDecoder.init(
+                    result_size,
+                    reply,
+                    batch_count,
+                );
+                var it: ?*Packet = packet;
+                while (it) |batch| {
+                    it = batch.next;
+                    batch.next = null;
+
+                    self.notify_completion(batch, .{
+                        .timestamp = timestamp,
+                        .reply = decoder.next().?,
+                    });
+                }
+                assert(decoder.next() == null);
+            }
         }
 
         fn signal_notify_callback(signal: *Signal) void {
@@ -501,8 +590,8 @@ pub fn ContextType(
 
             switch (self.state.load(.acquire)) {
                 .running => if (self.client.request_inflight == null) {
-                    if (self.submitted.pop()) |packet| {
-                        self.submit(packet);
+                    if (self.submitted.flush()) |packet_list| {
+                        self.submit(packet_list);
                     }
                 },
                 .evicted => return,
@@ -554,8 +643,6 @@ pub fn ContextType(
                 reply: []const u8,
             },
         ) void {
-            assert(packet.next == null);
-
             const completion_ctx = self.implementation.completion_ctx;
             const tb_client = api.context_to_client(&self.implementation);
             const result = completion catch |err| {

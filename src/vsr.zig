@@ -66,6 +66,9 @@ pub const CheckpointTrailerType = @import("vsr/checkpoint_trailer.zig").Checkpoi
 pub const GridScrubberType = @import("vsr/grid_scrubber.zig").GridScrubberType;
 pub const CountingAllocator = @import("counting_allocator.zig");
 
+pub const BatchEncoder = @import("vsr/batch.zig").BatchEncoder;
+pub const BatchDecoder = @import("vsr/batch.zig").BatchDecoder;
+
 /// The version of our Viewstamped Replication protocol in use, including customizations.
 /// For backwards compatibility through breaking changes (e.g. upgrading checksums/ciphers).
 pub const Version: u16 = 0;

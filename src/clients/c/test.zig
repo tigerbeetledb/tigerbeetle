@@ -116,9 +116,14 @@ test "u128 consistency test" {
 test "c_client echo" {
     // Using the create_accounts operation for this test.
     const RequestContext = RequestContextType(constants.message_body_size_max);
-    const create_accounts_operation: u8 = c.TB_OPERATION_CREATE_ACCOUNTS;
-    const event_size = @sizeOf(c.tb_account_t);
-    const event_request_max = @divFloor(constants.message_body_size_max, event_size);
+
+    // Test multiple operations to prevent all requests from ending up in the same batch.
+    const operations: [4]u8 = .{
+        c.TB_OPERATION_CREATE_ACCOUNTS,
+        c.TB_OPERATION_CREATE_TRANSFERS,
+        c.TB_OPERATION_LOOKUP_ACCOUNTS,
+        c.TB_OPERATION_LOOKUP_TRANSFERS,
+    };
 
     // Initializing an echo client for testing purposes.
     // We ensure that the retry mechanism is being tested
@@ -126,7 +131,7 @@ test "c_client echo" {
     var tb_client: c.tb_client_t = undefined;
     const cluster_id: u128 = 0;
     const address = "3000";
-    const concurrency_max: u32 = constants.client_request_queue_max * 2;
+    const concurrency_max: u32 = constants.client_request_queue_max * operations.len;
     const tb_context: usize = 42;
     const result = c.tb_client_init_echo(
         &tb_client,
@@ -152,6 +157,33 @@ test "c_client echo" {
     while (repetition < repetitions_max) : (repetition += 1) {
         var completion = Completion{ .pending = concurrency_max };
 
+        const operation = operations[
+            prng.random().intRangeAtMost(
+                usize,
+                0,
+                operations.len - 1,
+            )
+        ];
+        const event_size: u32, const event_request_max: u32 = switch (operation) {
+            c.TB_OPERATION_CREATE_ACCOUNTS => .{
+                @sizeOf(c.tb_account_t),
+                @divExact(constants.message_body_size_max, @sizeOf(c.tb_account_t)),
+            },
+            c.TB_OPERATION_CREATE_TRANSFERS => .{
+                @sizeOf(c.tb_transfer_t),
+                @divExact(constants.message_body_size_max, @sizeOf(c.tb_transfer_t)),
+            },
+            c.TB_OPERATION_LOOKUP_ACCOUNTS => .{
+                @sizeOf(u128),
+                @divExact(constants.message_body_size_max, @sizeOf(c.tb_account_t)),
+            },
+            c.TB_OPERATION_LOOKUP_TRANSFERS => .{
+                @sizeOf(u128),
+                @divExact(constants.message_body_size_max, @sizeOf(c.tb_transfer_t)),
+            },
+            else => unreachable,
+        };
+
         // Submitting some random data to be echoed back:
         for (requests) |*request| {
             request.* = .{
@@ -166,7 +198,7 @@ test "c_client echo" {
             prng.random().bytes(request.sent_data[0..request.sent_data_size]);
 
             const packet = &request.packet;
-            packet.operation = create_accounts_operation;
+            packet.operation = operation;
             packet.user_data = request;
             packet.data = &request.sent_data;
             packet.data_size = request.sent_data_size;

@@ -31,11 +31,6 @@ pub fn StateMachineType(
             pub const message_body_size_max = config.message_body_size_max;
         };
 
-        pub const batch_logical_allowed = std.enums.EnumArray(Operation, bool).init(.{
-            // Batching not supported by test StateMachine.
-            .echo = false,
-        });
-
         pub fn EventType(comptime _: Operation) type {
             return u8; // Must be non-zero-sized for sliceAsBytes().
         }
@@ -48,6 +43,20 @@ pub fn StateMachineType(
             batch_size_limit: u32,
             lsm_forest_node_count: u32,
         };
+
+        pub fn event_size_bytes(
+            _: vsr.Release,
+            _: Operation,
+        ) usize {
+            return @sizeOf(u8);
+        }
+
+        pub fn result_size_bytes(
+            _: vsr.Release,
+            _: Operation,
+        ) usize {
+            return @sizeOf(u8);
+        }
 
         pub const Forest = ForestType(Storage, .{ .things = ThingGroove });
 
@@ -170,16 +179,17 @@ pub fn StateMachineType(
             return true;
         }
 
-        pub fn prepare(
+        pub fn prepare_nanoseconds(
             state_machine: *StateMachine,
             client_release: vsr.Release,
             operation: Operation,
             input: []const u8,
-        ) void {
+        ) u64 {
             _ = state_machine;
             _ = client_release;
             _ = operation;
             _ = input;
+            return 0;
         }
 
         pub fn prefetch(
