@@ -82,7 +82,6 @@ const Environment = struct {
         .cache_entries_accounts = cache_entries_max,
         .cache_entries_transfers = cache_entries_max,
         .cache_entries_posted = cache_entries_max,
-        .cache_entries_account_balances = cache_entries_max,
     });
 
     const free_set_fragments_max = 2048;

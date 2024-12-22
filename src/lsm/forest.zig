@@ -99,6 +99,8 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
     // - tree_infos[tree_id - tree_id_range.min].tree_id == tree_id
     // - tree_infos.len == tree_id_range.max - tree_id_range.min
     const _tree_infos = tree_infos: {
+        @setEvalBranchQuota(32_000);
+
         var tree_infos: []const TreeInfo = &[_]TreeInfo{};
         for (std.meta.fields(_Grooves)) |groove_field| {
             const Groove = groove_field.type;

@@ -441,12 +441,14 @@ pub fn ScanType(
                             continue;
                         }
 
-                        if (index == .id) {
-                            // When iterating over `IdTree` it can return a timestamp zero, which
-                            // indicates an orphaned id.
-                            if (value.timestamp == 0) {
-                                assert(Groove.config.orphaned_ids);
-                                continue;
+                        if (Groove.IdTree != void) {
+                            if (index == .id) {
+                                // When iterating over `IdTree` it can return a timestamp zero,
+                                // which indicates an orphaned id.
+                                if (value.timestamp == 0) {
+                                    assert(Groove.config.orphaned_ids);
+                                    continue;
+                                }
                             }
                         }
 
