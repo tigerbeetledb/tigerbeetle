@@ -1071,16 +1071,6 @@ pub fn ReplicaType(
             });
             errdefer client_replies.deinit();
 
-            self.message_bus = try MessageBus.init(
-                allocator,
-                options.cluster,
-                .{ .replica = options.replica_index },
-                options.message_pool,
-                Replica.on_message_from_bus,
-                options.message_bus_options,
-            );
-            errdefer self.message_bus.deinit(allocator);
-
             self.grid = try Grid.init(allocator, .{
                 .superblock = &self.superblock,
                 .trace = &self.trace,
@@ -1109,6 +1099,16 @@ pub fn ReplicaType(
                 &self.client_sessions_checkpoint,
             );
             errdefer self.grid_scrubber.deinit(allocator);
+
+            self.message_bus = try MessageBus.init(
+                allocator,
+                options.cluster,
+                .{ .replica = options.replica_index },
+                options.message_pool,
+                Replica.on_message_from_bus,
+                options.message_bus_options,
+            );
+            errdefer self.message_bus.deinit(allocator);
 
             self.* = .{
                 .static_allocator = self.static_allocator,
