@@ -1100,6 +1100,12 @@ pub fn ReplicaType(
             );
             errdefer self.grid_scrubber.deinit(allocator);
 
+            // Initialize the MessageBus last. This brings the time when the replica can be
+            // externally spoken to (ie, MessageBus will accept TCP connections) closer to the time
+            // when Replica is actually listening for messages and won't simply drop them.
+            //
+            // Specifically, the grid cache in Grid.init above can take a long period of time while
+            // faulting in.
             self.message_bus = try MessageBus.init(
                 allocator,
                 options.cluster,
