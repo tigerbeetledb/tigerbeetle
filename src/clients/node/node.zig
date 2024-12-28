@@ -234,15 +234,6 @@ fn request(
     tb_client.submit(client, packet);
 }
 
-// Packet only has one size field which normally tracks `BufferType(op).events().len`.
-// However, completion of the packet can write results.len < `BufferType(op).results().len`.
-// Therefore, we stuff both `BufferType(op).count` and results.len into the packet's size field.
-// Storing both allows reconstruction of `BufferType(op)` while knowing how many results completed.
-const BufferSize = packed struct(u32) {
-    event_count: u16,
-    result_count: u16,
-};
-
 fn on_completion(
     completion_ctx: usize,
     client: tb_client.tb_client_t,
@@ -274,10 +265,9 @@ fn on_completion(
                     ));
                     @memcpy(buffer.results()[0..results.len], results);
 
-                    packet.data_size = @bitCast(BufferSize{
-                        .event_count = @intCast(event_count),
-                        .result_count = @intCast(results.len),
-                    });
+                    // Store the size of the results in the `tag` field, so we can access it back
+                    // during `on_completion_js`.
+                    packet.tag = @intCast(results.len);
                 },
                 .pulse => unreachable,
             }
@@ -319,16 +309,20 @@ fn on_completion_js(
     // Decode the packet's Buffer results into an array then free the packet/Buffer.
     const array_or_error = switch (@as(Operation, @enumFromInt(packet.operation))) {
         inline else => |op| blk: {
-            const buffer_size: BufferSize = @bitCast(packet.data_size);
+            const event_count = @divExact(
+                packet.data_size,
+                @sizeOf(StateMachine.EventType(op)),
+            );
             const buffer: BufferType(op) = .{
                 .ptr = @ptrCast(packet),
-                .count = buffer_size.event_count,
+                .count = event_count,
             };
             defer buffer.free();
 
             switch (packet.status) {
                 .ok => {
-                    const results = buffer.results()[0..buffer_size.result_count];
+                    const result_count = packet.tag;
+                    const results = buffer.results()[0..result_count];
                     break :blk encode_array(StateMachine.ResultType(op), env, results);
                 },
                 .client_shutdown => {
