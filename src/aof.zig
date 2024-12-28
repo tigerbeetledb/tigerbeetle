@@ -421,6 +421,7 @@ pub const AOFReplayClient = struct {
                 .session = 0,
                 .request = 0,
                 .release = header.release,
+                .batch_count = header.batch_count,
             };
 
             self.client.raw_request(AOFReplayClient.replay_callback, @intFromPtr(self), message);
@@ -445,11 +446,13 @@ pub const AOFReplayClient = struct {
         user_data: u128,
         operation: StateMachine.Operation,
         timestamp: u64,
-        result: []u8,
+        result: []const u8,
+        batch_count: u16,
     ) void {
         _ = operation;
         _ = timestamp;
         _ = result;
+        _ = batch_count;
 
         const self: *AOFReplayClient = @ptrFromInt(@as(usize, @intCast(user_data)));
         assert(self.inflight_message != null);
