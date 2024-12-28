@@ -1,34 +1,35 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
-const Atomic = std.atomic.Value;
 
-// When referenced from unit_test.zig, there is no vsr import module so use path.
-const vsr = if (@import("root") == @This()) @import("vsr") else @import("../../../vsr.zig");
-
-const constants = vsr.constants;
 const log = std.log.scoped(.tb_client_context);
 
+const api = @import("../tb_client.zig");
+const tb_completion_t = api.tb_completion_t;
+const vsr = api.vsr;
+
+const constants = vsr.constants;
 const stdx = vsr.stdx;
 const maybe = stdx.maybe;
 const Header = vsr.Header;
 
 const IO = vsr.io.IO;
+const FIFOType = vsr.fifo.FIFOType;
 const message_pool = vsr.message_pool;
 
-const BatchEncoder = vsr.BatchEncoder;
-const BatchDecoder = vsr.BatchDecoder;
+const BatchEncoder = vsr.batch.BatchEncoder;
+const BatchDecoder = vsr.batch.BatchDecoder;
+const batch_trailer_total_size = vsr.batch.batch_trailer_total_size;
 
 const MessagePool = message_pool.MessagePool;
 const Message = MessagePool.Message;
+
 const Packet = @import("packet.zig").Packet;
 const Signal = @import("signal.zig").Signal;
 
-const api = @import("../tb_client.zig");
-const tb_completion_t = api.tb_completion_t;
-
 pub const ContextImplementation = struct {
     completion_ctx: usize,
-    submit_fn: *const fn (*ContextImplementation, *Packet) void,
+    submit_fn: *const fn (*ContextImplementation, *Packet.Extern) void,
     deinit_fn: *const fn (*ContextImplementation) void,
 };
 
@@ -90,12 +91,6 @@ pub fn ContextType(
             InvalidDataSize,
         };
 
-        const State = enum(u8) {
-            running,
-            shutdown,
-            evicted,
-        };
-
         allocator: std.mem.Allocator,
         client_id: u128,
 
@@ -108,9 +103,10 @@ pub fn ContextType(
         completion_fn: tb_completion_t,
         implementation: ContextImplementation,
 
-        signal: Signal,
         submitted: Packet.SubmissionQueue,
-        state: Atomic(State),
+        pending: FIFOType(Packet),
+
+        signal: Signal,
         eviction_reason: ?vsr.Header.Eviction.Reason,
         thread: std.Thread,
 
@@ -203,7 +199,10 @@ pub fn ContextType(
             };
 
             context.submitted = .{};
-            context.state = Atomic(State).init(.running);
+            context.pending = .{
+                .name = null,
+                .verify_push = builtin.is_test,
+            };
             context.eviction_reason = null;
 
             log.debug("{}: init: initializing signal", .{context.client_id});
@@ -232,15 +231,14 @@ pub fn ContextType(
             return context;
         }
 
+        /// Only one thread calls `deinit()`.
+        /// Since it frees the Context, any further interaction is undefined behavior.
         pub fn deinit(self: *Context) void {
-            // Since `self` is dealocated here, it's UB for any further Context interaction.
-            const state_previous = self.state.swap(.shutdown, .release);
-            assert(state_previous == .running or state_previous == .evicted);
-
-            // Wake up the run() thread for it to observe `state != .running`,
-            // cancel inflight/pending packets, and finish running.
             self.signal.stop();
             self.thread.join();
+
+            assert(self.submitted.pop() == null);
+            assert(self.pending.pop() == null);
 
             self.io.cancel_all();
 
@@ -252,9 +250,15 @@ pub fn ContextType(
             self.allocator.destroy(self);
         }
 
-        pub fn io_thread(self: *Context) void {
-            while (!self.signal.stop_requested()) {
+        fn tick(self: *Context) void {
+            if (self.eviction_reason == null) {
                 self.client.tick();
+            }
+        }
+
+        fn io_thread(self: *Context) void {
+            while (!self.signal.stop_requested()) {
+                self.tick();
                 self.io.run_for_ns(constants.tick_ms * std.time.ns_per_ms) catch |err| {
                     log.err("{}: IO.run() failed: {s}", .{
                         self.client_id,
@@ -263,50 +267,84 @@ pub fn ContextType(
                     @panic("IO.run() failed");
                 };
             }
+            self.cancel_queued_packets();
+        }
 
-            // Cancelling any inflight or queued request.
-            var packet_list: ?*Packet = packet_list: {
-                if (self.client.request_inflight) |*inflight| {
-                    if (inflight.message.header.operation != .register) {
-                        const user_data: UserData = @bitCast(inflight.user_data);
-                        // Cancel the request_inflight packet if any.
-                        break :packet_list user_data.packet;
-                    }
-                }
+        /// Cancels all submitted/pending packets.
+        fn cancel_queued_packets(self: *Context) void {
+            while (self.pending.pop()) |packet| {
+                packet.assert_phase(.pending);
+                self.packet_cancel(packet);
+            }
 
-                break :packet_list self.submitted.flush();
-            };
-            while (packet_list) |packet| {
-                packet_list = packet.next orelse self.submitted.flush();
-                packet.next = null;
-                self.cancel(packet);
+            while (self.submitted.pop()) |packet| {
+                packet.assert_phase(.submitted);
+                self.packet_cancel(packet);
             }
         }
 
-        /// Submit the enqueued requests through the vsr client.
-        /// Always called by the io thread.
-        fn submit(self: *Context, packet_list: *Packet) void {
-            assert(self.batch_size_limit != null);
-            assert(self.client.request_inflight == null);
+        /// Calls the user callback when a packet is canceled due to the client
+        /// being either evicted or shutdown.
+        fn packet_cancel(self: *Context, packet: *Packet) void {
+            assert(packet.next == null);
+            const result = if (self.eviction_reason) |reason| switch (reason) {
+                .reserved => unreachable,
+                .client_release_too_low => error.ClientReleaseTooLow,
+                .client_release_too_high => error.ClientReleaseTooHigh,
+                else => error.ClientEvicted,
+            } else result: {
+                assert(self.signal.stop_requested());
+                break :result error.ClientShutdown;
+            };
 
-            // Find a valid packet to start the batch.
-            const head: *Packet = head: {
-                var it: ?*Packet = packet_list;
-                while (it) |packet| {
-                    it = packet.next;
-                    if (self.packet_valid(packet)) break :head packet;
+            if (packet.batch_count == 0) {
+                assert(packet.batch_next == null);
+                self.notify_completion(packet, result);
+            } else {
+                // Although the protocol allows `batch_count == 1`,
+                // the client never packages a single packet into a batched request.
+                assert(packet.batch_count > 1);
+                assert(packet.batch_next != null);
+                var it: ?*Packet = packet;
+                while (it) |batched| {
+                    it = batched.batch_next;
+                    self.notify_completion(batched, result);
                 }
-                // Nothing to send.
-                self.signal.notify();
+            }
+        }
+
+        fn packet_enqueue(self: *Context, packet: *Packet) void {
+            assert(self.batch_size_limit != null);
+            packet.assert_phase(.submitted);
+
+            if (self.eviction_reason != null) {
+                return self.packet_cancel(packet);
+            }
+
+            const operation: StateMachine.Operation = operation_from_int(packet.operation) orelse {
+                self.notify_completion(packet, error.InvalidOperation);
                 return;
             };
 
-            const operation: StateMachine.Operation = operation_from_int(head.operation).?;
-            const event_size: usize, const events_batch_max: usize =
-                switch (operation) {
+            const event_size: usize, const events_batch_max: usize = switch (operation) {
                 .pulse => unreachable,
                 inline else => |operation_comptime| blk: {
-                    const event_size = @sizeOf(StateMachine.EventType(operation_comptime));
+                    // Make sure the packet.data wouldn't overflow a request,
+                    // and that the corresponding results won't overflow a reply.
+                    const Event = StateMachine.EventType(operation_comptime);
+                    const event_size = @sizeOf(Event);
+                    const slice: []const u8 = packet.slice();
+
+                    if (slice.len % event_size != 0) {
+                        self.notify_completion(packet, error.InvalidDataSize);
+                        return;
+                    }
+
+                    if (slice.len > self.batch_size_limit.?) {
+                        self.notify_completion(packet, error.TooMuchData);
+                        return;
+                    }
+
                     const events_batch_max = if (StateMachine.event_is_slice(operation))
                         StateMachine.operation_batch_max(
                             operation_comptime,
@@ -315,83 +353,146 @@ pub fn ContextType(
                     else
                         1;
 
+                    if (@divExact(slice.len, event_size) > events_batch_max) {
+                        self.notify_completion(packet, error.TooMuchData);
+                        return;
+                    }
+
                     break :blk .{ event_size, events_batch_max };
                 },
             };
             assert(self.batch_size_limit.? >= event_size * events_batch_max);
 
-            const message = self.client.get_message().build(.request);
-            defer self.client.release_message(message.base());
+            // Nothing inflight means the packet should be submitted right now.
+            if (self.client.request_inflight == null) {
+                assert(self.pending.count == 0);
 
-            var encoder = BatchEncoder.init(
-                event_size,
-                message.buffer[@sizeOf(Header)..][0 .. event_size * events_batch_max],
-            );
+                packet.phase = .pending;
+                self.packet_send(packet);
+                return;
+            }
 
-            // Whether to batch this packet with others in the same request,
-            // or send it on it's own message.
-            const is_batchable = head.next != null and
-                StateMachine.event_is_slice(operation) and
-                encoder.can_add(head.events().len);
+            // If allowed, try to batch the packet with another already in `pending`.
+            if (events_batch_max > 1) {
+                var it = self.pending.peek();
+                while (it) |root| {
+                    root.assert_phase(.pending);
+                    it = root.next;
 
-            const bytes_written: usize, const batch_count: u16 = if (is_batchable) blk: {
+                    if (root.operation != packet.operation) continue;
 
-                // ********************************************************************************
-                // NOTE: This algorithm iterates over the linked list in O(n) time for each request
-                // and is susceptible to starvation, as it reorders packets when returning them to
-                // the queue. It's merely an attempt to remove the batch-specific linked list
-                // fields from `Packet`.
-                // ********************************************************************************
+                    // Although the protocol allows `batch_count == 1`,
+                    // the client never packages a single packet into a batched request.
+                    // Instead, it sends a non-batched request with `batch_count == 0` to avoid
+                    // wasting message body bytes with the batch trailer.
+                    if (root.batch_count == 0) {
+                        assert(root.batch_next == null);
+                        const total_size = root.data_size + packet.data_size +
+                            batch_trailer_total_size(.{
+                            .element_size = event_size,
+                            .batch_count = 2,
+                        });
+                        if (total_size > self.batch_size_limit.?) continue;
+                        if (@divExact(total_size, event_size) > events_batch_max) continue;
 
-                // Encoding the first packet into the batch:
-                stdx.copy_disjoint(.inexact, u8, encoder.writable(), head.events());
-                encoder.add(head.events().len);
-
-                // Iterating for other packets with the same `operation` that might be sent together
-                // in the same message.
-                var it: ?*Packet = head.next;
-                var packet_tail = head;
-                packet_tail.next = null;
-                while (it) |batch| {
-                    it = batch.next;
-                    if (!self.packet_valid(batch)) continue;
-
-                    if (batch.operation == head.operation and
-                        encoder.can_add(batch.events().len))
-                    {
-                        const event_data = batch.events();
-                        stdx.copy_disjoint(.inexact, u8, encoder.writable(), event_data);
-                        encoder.add(event_data.len);
-
-                        packet_tail.next = batch;
-                        batch.next = null;
-                        packet_tail = batch;
+                        root.batch_count = 2;
+                        root.batch_next = packet;
+                        root.batch_tail = packet;
+                        root.batch_events = @intCast(@divExact(
+                            root.data_size + packet.data_size,
+                            event_size,
+                        ));
                     } else {
-                        // There's no room for this packet, returning it to the queue,
-                        // it will be sent next time.
-                        self.submitted.push(batch);
-                    }
-                }
-                encoder.finish();
+                        assert(root.batch_count > 1);
+                        assert(root.batch_next != null);
+                        const total_size = (root.batch_events * event_size) +
+                            packet.data_size + batch_trailer_total_size(.{
+                            .element_size = event_size,
+                            .batch_count = root.batch_count + 1,
+                        });
+                        if (total_size > self.batch_size_limit.?) continue;
+                        if (@divExact(total_size, event_size) > events_batch_max) continue;
 
-                break :blk .{ encoder.bytes_written, encoder.batch_count };
-            } else blk: {
-                var it: ?*Packet = head.next;
-                head.next = null;
-                while (it) |batch| {
-                    it = batch.next;
-                    if (self.packet_valid(batch)) {
-                        self.submitted.push(batch);
+                        root.batch_count += 1;
+                        root.batch_tail.?.batch_next = packet;
+                        root.batch_tail = packet;
+                        root.batch_events += @intCast(@divExact(packet.data_size, event_size));
                     }
-                }
 
-                const event_data = head.events();
-                stdx.copy_disjoint(.inexact, u8, message.buffer[@sizeOf(Header)..], event_data);
-                break :blk .{ event_data.len, 0 };
+                    packet.phase = .batched;
+                    return;
+                }
+            }
+
+            // Couldn't batch with existing packet so push to pending directly.
+            packet.phase = .pending;
+            self.pending.push(packet);
+        }
+
+        /// Sends the packet (the entire batched liked list of packets) through the vsr client.
+        /// Always called by the io thread.
+        fn packet_send(self: *Context, packet: *Packet) void {
+            assert(self.batch_size_limit != null);
+            assert(self.client.request_inflight == null);
+            packet.assert_phase(.pending);
+
+            if (self.signal.stop_requested()) {
+                self.packet_cancel(packet);
+                return;
+            }
+
+            const operation: StateMachine.Operation = operation_from_int(packet.operation).?;
+            const event_size: usize = switch (operation) {
+                .pulse => unreachable,
+                inline else => |operation_comptime| @sizeOf(
+                    StateMachine.EventType(operation_comptime),
+                ),
             };
-            assert(batch_count == 0 or is_batchable);
+
+            const message = self.client.get_message().build(.request);
+            // Don't need to release the message, since this function cannot fail/return early.
+            defer packet.assert_phase(.sent);
+
+            const bytes_written: usize = bytes_written: {
+                if (packet.batch_count == 0) {
+                    assert(packet.batch_next == null);
+                    const slice: []const u8 = packet.slice();
+                    stdx.copy_disjoint(
+                        .inexact,
+                        u8,
+                        message.buffer[@sizeOf(Header)..],
+                        slice,
+                    );
+                    break :bytes_written slice.len;
+                } else {
+                    // Although the protocol allows `batch_count == 1`,
+                    // the client never packages a single packet into a batched request.
+                    assert(packet.batch_count > 1);
+                    assert(packet.batch_next != null);
+
+                    var encoder = BatchEncoder.init(
+                        event_size,
+                        message.buffer[@sizeOf(Header)..],
+                    );
+
+                    var it: ?*Packet = packet;
+                    while (it) |batched| {
+                        it = batched.batch_next;
+                        if (encoder.batch_count > 0) batched.assert_phase(.batched);
+
+                        const slice: []const u8 = batched.slice();
+                        stdx.copy_disjoint(.inexact, u8, encoder.writable(), slice);
+                        encoder.add(slice.len);
+                    }
+                    assert(encoder.batch_count == packet.batch_count);
+                    assert(packet.batch_events == @divExact(encoder.bytes_written, event_size));
+                    encoder.finish();
+
+                    break :bytes_written encoder.bytes_written;
+                }
+            };
             assert(bytes_written % event_size == 0);
-            assert(bytes_written <= events_batch_max * event_size);
+            assert(bytes_written <= self.batch_size_limit.?);
 
             message.header.* = .{
                 .release = self.client.release,
@@ -401,86 +502,57 @@ pub fn ContextType(
                 .command = .request,
                 .operation = vsr.Operation.from(StateMachine, operation),
                 .size = @intCast(@sizeOf(vsr.Header) + bytes_written),
-                .batch_count = batch_count,
+                .batch_count = packet.batch_count,
             };
 
+            packet.phase = .sent;
             self.client.raw_request(
                 Context.client_result_callback,
                 @bitCast(UserData{
                     .self = self,
-                    .packet = head,
+                    .packet = packet,
                 }),
-                message.ref(),
+                message,
             );
         }
 
-        /// Validate the packet, calling the completion callback if invalid.
-        /// When the result is `false` then `packet: *Packet` isn't valid anymore.
-        fn packet_valid(self: *Context, packet: *Packet) bool {
-            assert(packet.status == .ok);
-            assert(packet.data != null or packet.data_size == 0);
-            assert(stdx.zeroed(&packet.reserved));
-            maybe(packet.next == null);
-            maybe(packet.user_data == null);
+        fn signal_notify_callback(signal: *Signal) void {
+            const self: *Context = @alignCast(@fieldParentPtr("signal", signal));
 
-            const operation: StateMachine.Operation = operation_from_int(packet.operation) orelse {
-                self.notify_completion(packet, error.InvalidOperation);
-                return false;
-            };
-
-            switch (operation) {
-                .pulse => unreachable,
-                inline else => |operation_comptime| {
-                    // Make sure the packet.data wouldn't overflow a request,
-                    // and that the corresponding results won't overflow a reply.
-                    const Event = StateMachine.EventType(operation_comptime);
-                    const event_size = @sizeOf(Event);
-                    const events: []const u8 = packet.events();
-
-                    const events_batch_max = StateMachine.operation_batch_max(
-                        operation_comptime,
-                        self.batch_size_limit.?,
-                    );
-
-                    if (events.len % event_size != 0) {
-                        self.notify_completion(packet, error.InvalidDataSize);
-                        return false;
-                    }
-
-                    if (@divExact(events.len, event_size) > events_batch_max) {
-                        self.notify_completion(packet, error.TooMuchData);
-                        return false;
-                    }
-
-                    if (events.len > self.batch_size_limit.?) {
-                        self.notify_completion(packet, error.TooMuchData);
-                        return false;
-                    }
-                },
+            // Don't send any requests until registration completes.
+            if (self.batch_size_limit == null) {
+                assert(self.client.request_inflight != null);
+                assert(self.client.request_inflight.?.message.header.operation == .register);
+                return;
             }
 
-            return true;
-        }
+            // Prevents IO thread starvation under heavy client load.
+            // Process only the minimal number of packets for the next pending request.
+            const enqueued_count = self.pending.count;
+            // Avoid unbounded loop in case of invalid packets.
+            const safety_limit = 8 * 1024;
+            for (0..safety_limit) |_| {
+                const packet = self.submitted.pop() orelse return;
+                self.packet_enqueue(packet);
 
-        /// Calls the user callback when a packet is canceled due to the client
-        /// being either evicted or shutdown.
-        fn cancel(self: *Context, packet: *Packet) void {
-            assert(packet.next == null);
-            const result = switch (self.state.load(.monotonic)) {
-                .running => unreachable,
-                .shutdown => error.ClientShutdown,
-                .evicted => switch (self.eviction_reason.?) {
-                    .reserved => unreachable,
-                    .client_release_too_low => error.ClientReleaseTooLow,
-                    .client_release_too_high => error.ClientReleaseTooHigh,
-                    else => error.ClientEvicted,
-                },
-            };
-            self.notify_completion(packet, result);
+                // Packets can be processed without increasing `pending.count`:
+                // - If the packet is invalid.
+                // - If there's no in-flight request, the packet is sent immediately without
+                //   using the pending queue.
+                // - If the packet can be batched with another previously enqueued packet.
+                if (self.pending.count > enqueued_count) break;
+            }
+
+            // Defer this work to later,
+            // allowing the IO thread to remain free for processing completions.
+            if (!self.submitted.empty()) {
+                self.signal.notify();
+            }
         }
 
         fn client_register_callback(user_data: u128, result: *const vsr.RegisterResult) void {
             const self: *Context = @ptrFromInt(@as(usize, @intCast(user_data)));
+            assert(self.client.request_inflight == null);
             assert(self.batch_size_limit == null);
             assert(result.batch_size_limit > 0);
 
@@ -503,23 +575,16 @@ pub fn ContextType(
             });
 
             self.eviction_reason = eviction.header.reason;
-            const state_previous = self.state.cmpxchgStrong(
-                .running,
-                .evicted,
-                .release,
-                .acquire,
-            ) orelse {
-                // The previous state was "running" as expected.
-                return;
-            };
 
-            // Cannot be evicted twice.
-            assert(state_previous != .evicted);
-
-            // The eviction can arrive during the shutdown,
-            // ignoring the eviction reason.
-            assert(state_previous == .shutdown);
-            self.eviction_reason = null;
+            // Cancel the current inflight packet, as it won't be replied anymore.
+            if (self.client.request_inflight) |*inflight| {
+                if (inflight.message.header.operation != .register) {
+                    const packet = @as(UserData, @bitCast(inflight.user_data)).packet;
+                    packet.assert_phase(.sent);
+                    self.packet_cancel(packet);
+                }
+            }
+            self.cancel_queued_packets();
         }
 
         fn client_result_callback(
@@ -533,97 +598,82 @@ pub fn ContextType(
             const self = user_data.self;
             const packet = user_data.packet;
             assert(packet.operation == @intFromEnum(operation));
+            assert(packet.batch_count == batch_count);
             assert(timestamp > 0);
+            packet.assert_phase(.sent);
 
             // Submit the next pending packet (if any) now that VSR has completed this one.
             assert(self.client.request_inflight == null);
-            if (self.submitted.flush()) |packet_list| {
-                self.submit(packet_list);
+            while (self.pending.pop()) |packet_next| {
+                self.packet_send(packet_next);
+                if (self.client.request_inflight != null) break;
             }
 
-            // `StateMachine.result_size_bytes` is intended for use on the replica side,
-            // as it provides backward compatibility with older clients.
-            // On the client side, the size of the compiled result type should be used instead.
-            const result_size: usize = inline for (allowed_operations) |operation_comptime| {
-                if (operation == operation_comptime) {
-                    break @sizeOf(StateMachine.ResultType(operation_comptime));
-                }
-            } else unreachable;
+            const result_size: usize = switch (operation) {
+                .pulse => unreachable,
+                inline else => |operation_comptime| @sizeOf(
+                    // `StateMachine.result_size_bytes` is intended for use on the replica side,
+                    // as it provides backward compatibility with older clients.
+                    StateMachine.ResultType(operation_comptime),
+                ),
+            };
+            assert(reply.len % result_size == 0);
 
-            assert(result_size % result_size == 0);
             if (batch_count == 0) {
-                assert(packet.next == null);
+                assert(packet.batch_next == null);
                 self.notify_completion(packet, .{
                     .timestamp = timestamp,
                     .reply = reply,
                 });
             } else {
-                assert(batch_count > 1 or packet.next == null);
+                // Although the protocol allows `batch_count == 1`,
+                // the client never packages a single packet into a batched request.
+                assert(batch_count > 1);
+                assert(packet.batch_next != null);
                 var decoder = BatchDecoder.init(
                     result_size,
                     reply,
                     batch_count,
                 );
-                var it: ?*Packet = packet;
-                while (it) |batch| {
-                    it = batch.next;
-                    batch.next = null;
 
-                    self.notify_completion(batch, .{
+                var it: ?*Packet = packet;
+                while (it) |batched| {
+                    it = batched.batch_next;
+                    if (batched != packet) batched.assert_phase(.batched);
+
+                    const batched_reply: []const u8 = decoder.next().?;
+                    maybe(batched_reply.len == 0);
+                    assert(batched_reply.len % result_size == 0);
+
+                    self.notify_completion(batched, .{
                         .timestamp = timestamp,
-                        .reply = decoder.next().?,
+                        .reply = batched_reply,
                     });
                 }
                 assert(decoder.next() == null);
             }
         }
 
-        fn signal_notify_callback(signal: *Signal) void {
-            const self: *Context = @alignCast(@fieldParentPtr("signal", signal));
-
-            // Don't send any requests until registration completes.
-            if (self.batch_size_limit == null) {
-                assert(self.client.request_inflight != null);
-                assert(self.client.request_inflight.?.message.header.operation == .register);
-                return;
-            }
-
-            switch (self.state.load(.acquire)) {
-                .running => if (self.client.request_inflight == null) {
-                    if (self.submitted.flush()) |packet_list| {
-                        self.submit(packet_list);
-                    }
-                },
-                .evicted => return,
-                .shutdown => return,
-            }
-        }
-
         /// Called by the user thread when a packet is submitted.
         /// This function is thread-safe.
-        fn on_submit(implementation: *ContextImplementation, packet: *Packet) void {
-            const self = get_context(implementation);
+        fn on_submit(implementation: *ContextImplementation, packet_extern: *Packet.Extern) void {
             // Packet is caller-allocated to enable elastic intrusive-link-list-based memory
             // management. However, some of Packet's fields are essentially private. Initialize
             // them here to avoid threading default fields through FFI boundary.
-            packet.* = .{
-                .next = null,
-                .user_data = packet.user_data,
-                .operation = packet.operation,
-                .data_size = packet.data_size,
-                .data = packet.data,
+            packet_extern.* = .{
+                .user_data = packet_extern.user_data,
+                .operation = packet_extern.operation,
+                .data_size = packet_extern.data_size,
+                .data = packet_extern.data,
+                .tag = packet_extern.tag,
                 .status = .ok,
             };
 
-            // The caller can try to submit during shudown/eviction.
-            const state = self.state.load(.acquire);
-            if (state != .running) {
-                self.cancel(packet);
-                return;
-            }
+            const self = get_context(implementation);
+            assert(!self.signal.stop_requested());
 
             // Enqueue the packet and notify the IO thread to process it asynchronously.
-            self.submitted.push(packet);
+            self.submitted.push(packet_extern.cast());
             self.signal.notify();
         }
 
@@ -656,12 +706,13 @@ pub fn ContextType(
                     error.InvalidDataSize => .invalid_data_size,
                 };
                 assert(packet.status != .ok);
+                packet.phase = .complete;
 
                 // The packet completed with an error.
                 (self.completion_fn)(
                     completion_ctx,
                     tb_client,
-                    packet,
+                    packet.cast(),
                     0,
                     null,
                     0,
@@ -671,10 +722,11 @@ pub fn ContextType(
 
             // The packet completed normally.
             assert(packet.status == .ok);
+            packet.phase = .complete;
             (self.completion_fn)(
                 completion_ctx,
                 tb_client,
-                packet,
+                packet.cast(),
                 result.timestamp,
                 result.reply.ptr,
                 @intCast(result.reply.len),

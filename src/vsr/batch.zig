@@ -13,7 +13,7 @@ const vsr = @import("../vsr.zig");
 /// space occupied by the trailer may be larger, as it must align with the element size.
 /// In the case of operations where `element_size` is zero, the trailer must be aligned
 /// to `@alignOf(u16)` (2 bytes).
-fn trailer_total_size(options: struct {
+pub fn batch_trailer_total_size(options: struct {
     element_size: usize,
     batch_count: u16,
 }) usize {
@@ -46,7 +46,7 @@ pub const BatchDecoder = struct {
         assert(body.len > 0);
         assert(element_size == 0 or body.len % element_size == 0);
 
-        const trailer_size = trailer_total_size(.{
+        const trailer_size = batch_trailer_total_size(.{
             .element_size = element_size,
             .batch_count = batch_count,
         });
@@ -155,7 +155,7 @@ pub const BatchEncoder = struct {
         assert(self.buffer != null);
         assert(self.bytes_written % self.element_size == 0);
 
-        const trailer_size = trailer_total_size(.{
+        const trailer_size = batch_trailer_total_size(.{
             .element_size = self.element_size,
             .batch_count = self.batch_count + 1,
         });
@@ -170,7 +170,7 @@ pub const BatchEncoder = struct {
         assert(self.buffer != null);
         assert(self.bytes_written % self.element_size == 0);
 
-        const trailer_size = trailer_total_size(.{
+        const trailer_size = batch_trailer_total_size(.{
             .element_size = self.element_size,
             .batch_count = self.batch_count + 1,
         });
@@ -187,7 +187,7 @@ pub const BatchEncoder = struct {
         self.batch_count += 1;
         self.bytes_written += bytes_written;
 
-        const trailer_size = trailer_total_size(.{
+        const trailer_size = batch_trailer_total_size(.{
             .element_size = self.element_size,
             .batch_count = self.batch_count,
         });
@@ -220,7 +220,7 @@ pub const BatchEncoder = struct {
 
         const buffer = self.buffer.?;
 
-        const trailer_size = trailer_total_size(.{
+        const trailer_size = batch_trailer_total_size(.{
             .element_size = self.element_size,
             .batch_count = self.batch_count,
         });
@@ -275,7 +275,7 @@ const test_batch = struct {
         const expected = try allocator.alloc(u16, options.batch_count);
         defer allocator.free(expected);
 
-        const trailer_size = trailer_total_size(.{
+        const trailer_size = batch_trailer_total_size(.{
             .element_size = options.element_size,
             .batch_count = options.batch_count,
         });
@@ -377,7 +377,7 @@ test "batch: maximum batches with no elements" {
 
     const batch_count = std.math.maxInt(u16);
     const element_size = 128;
-    const buffer_size = trailer_total_size(.{
+    const buffer_size = batch_trailer_total_size(.{
         .element_size = element_size,
         .batch_count = batch_count,
     });

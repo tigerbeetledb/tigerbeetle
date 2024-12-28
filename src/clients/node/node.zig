@@ -225,9 +225,9 @@ fn request(
     packet.* = .{
         .user_data = callback_ref,
         .operation = @intFromEnum(operation),
-        .data_size = @intCast(packet_data.len),
         .data = packet_data.ptr,
-        .next = undefined,
+        .data_size = @intCast(packet_data.len),
+        .tag = 0,
         .status = undefined,
     };
 

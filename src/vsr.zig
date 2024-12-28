@@ -25,6 +25,7 @@ pub const superblock = @import("vsr/superblock.zig");
 pub const aof = @import("aof.zig");
 pub const repl = @import("repl.zig");
 pub const statsd = @import("statsd.zig");
+pub const batch = @import("vsr/batch.zig");
 pub const lsm = .{
     .tree = @import("lsm/tree.zig"),
     .groove = @import("lsm/groove.zig"),
@@ -65,9 +66,6 @@ pub const FreeSet = @import("vsr/free_set.zig").FreeSet;
 pub const CheckpointTrailerType = @import("vsr/checkpoint_trailer.zig").CheckpointTrailerType;
 pub const GridScrubberType = @import("vsr/grid_scrubber.zig").GridScrubberType;
 pub const CountingAllocator = @import("counting_allocator.zig");
-
-pub const BatchEncoder = @import("vsr/batch.zig").BatchEncoder;
-pub const BatchDecoder = @import("vsr/batch.zig").BatchDecoder;
 
 /// The version of our Viewstamped Replication protocol in use, including customizations.
 /// For backwards compatibility through breaking changes (e.g. upgrading checksums/ciphers).

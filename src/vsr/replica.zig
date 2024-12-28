@@ -27,8 +27,8 @@ const Command = vsr.Command;
 const Version = vsr.Version;
 const SyncStage = vsr.SyncStage;
 const ClientSessions = vsr.ClientSessions;
-const BatchDecoder = vsr.BatchDecoder;
-const BatchEncoder = vsr.BatchEncoder;
+const BatchDecoder = vsr.batch.BatchDecoder;
+const BatchEncoder = vsr.batch.BatchEncoder;
 
 const log = marks.wrap_log(stdx.log.scoped(.replica));
 
@@ -4736,8 +4736,13 @@ pub fn ReplicaType(
                             body_decoder.payload, // The entire message's body without the trailer.
                         );
                         log.debug(
-                            "{}: execute_op: batch_count={} operation={s}",
-                            .{ self.replica, prepare.header.batch_count, @tagName(operation) },
+                            "{}: execute_op: op={} batch_count={} operation={s}",
+                            .{
+                                self.replica,
+                                prepare.header.op,
+                                prepare.header.batch_count,
+                                @tagName(operation),
+                            },
                         );
 
                         while (body_decoder.next()) |batch| {

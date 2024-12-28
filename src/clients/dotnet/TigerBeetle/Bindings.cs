@@ -1209,13 +1209,13 @@ internal enum TBOperation : byte
 [StructLayout(LayoutKind.Sequential, Size = SIZE)]
 internal unsafe struct TBPacket
 {
-    public const int SIZE = 32;
+    public const int SIZE = 56;
 
 
     [StructLayout(LayoutKind.Sequential, Size = SIZE)]
     private unsafe struct ReservedData
     {
-        public const int SIZE = 2;
+        public const int SIZE = 32;
 
         private fixed byte raw[SIZE];
 
@@ -1242,13 +1242,13 @@ internal unsafe struct TBPacket
         }
     }
 
-    public TBPacket* next;
-
     public IntPtr userData;
 
     public IntPtr data;
 
     public uint dataSize;
+
+    public ushort tag;
 
     public byte operation;
 

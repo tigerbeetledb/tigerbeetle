@@ -2,6 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const vsr = @import("../tb_client.zig").vsr;
+const maybe = vsr.stdx.maybe;
 const Time = vsr.time.Time;
 const IO = vsr.io.IO;
 
@@ -86,7 +87,7 @@ pub const Signal = struct {
     }
 
     fn wait(self: *Signal) void {
-        assert(!self.stop_requested());
+        maybe(self.stop_requested()); // Stop requested while processing the event.
 
         const state = self.state.swap(.waiting, .acquire);
         self.io.event_listen(self.event, &self.completion, on_event);
