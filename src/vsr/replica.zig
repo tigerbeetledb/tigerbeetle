@@ -4199,7 +4199,7 @@ pub fn ReplicaType(
                         event_size,
                         prepare.body_used(),
                         prepare.header.batch_count,
-                    );
+                    ) catch unreachable; // Validated during `ignore_request_message()`.
 
                     break :body decoder.payload;
                 };
@@ -4723,7 +4723,7 @@ pub fn ReplicaType(
                             StateMachine.event_size_bytes(prepare.header.release, operation),
                             prepare.body_used(), // The message's with the trailer.
                             prepare.header.batch_count,
-                        );
+                        ) catch unreachable; // Validated during `ignore_request_message()`.
                         var reply_encoder = BatchEncoder.init(
                             StateMachine.result_size_bytes(prepare.header.release, operation),
                             reply.buffer[@sizeOf(Header)..],
@@ -5566,17 +5566,42 @@ pub fn ReplicaType(
                 return true;
             }
             if (StateMachine.operation_from_vsr(message.header.operation)) |operation| {
-                if (!self.state_machine.input_valid(
-                    message.header.release,
-                    operation,
-                    message.body_used(),
-                )) {
+                const input_valid = input_valid: {
+                    if (message.header.batch_count == 0) {
+                        break :input_valid self.state_machine.input_valid(
+                            message.header.release,
+                            operation,
+                            message.body_used(),
+                        );
+                    } else {
+                        const decoder = BatchDecoder.init(
+                            StateMachine.event_size_bytes(
+                                message.header.release,
+                                operation,
+                            ),
+                            message.body_used(),
+                            message.header.batch_count,
+                        ) catch |err| switch (err) {
+                            error.BatchInvalid => break :input_valid false,
+                        };
+
+                        break :input_valid self.state_machine.input_valid(
+                            message.header.release,
+                            operation,
+                            decoder.payload,
+                        );
+                    }
+                };
+
+                if (!input_valid) {
                     log.warn(
-                        "{}: on_request: ignoring invalid body (operation={s}, body.len={})",
+                        "{}: on_request: ignoring invalid body " ++
+                            "(operation={s}, body.len={}, batch_count={})",
                         .{
                             self.replica,
                             @tagName(operation),
                             message.body_used().len,
+                            message.header.batch_count,
                         },
                     );
                     self.send_eviction_message_to_client(
@@ -6494,7 +6519,7 @@ pub fn ReplicaType(
                             event_size,
                             request.message.body_used(),
                             request.message.header.batch_count,
-                        );
+                        ) catch unreachable; // Validated during `ignore_request_message()`.
 
                         break :body decoder.payload;
                     };

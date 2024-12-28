@@ -41,51 +41,61 @@ pub const BatchDecoder = struct {
         body: []const u8,
         /// The number of batches encoded in this body.
         batch_count: u16,
-    ) BatchDecoder {
-        assert(batch_count > 0);
-        assert(body.len > 0);
-        assert(element_size == 0 or body.len % element_size == 0);
+    ) error{BatchInvalid}!BatchDecoder {
+        if (batch_count == 0) return error.BatchInvalid;
+        if (body.len == 0) return error.BatchInvalid;
+        if ((element_size > 0 and body.len % element_size != 0) or
+            (element_size == 0 and body.len % @sizeOf(u16) != 0))
+        {
+            return error.BatchInvalid;
+        }
 
         const trailer_size = batch_trailer_total_size(.{
             .element_size = element_size,
             .batch_count = batch_count,
         });
-        if (element_size == 0) {
-            assert(body.len == trailer_size);
-        } else {
-            assert(body.len >= trailer_size);
+        if ((element_size > 0 and body.len < trailer_size) or
+            (element_size == 0 and body.len != trailer_size))
+        {
+            return error.BatchInvalid;
         }
 
-        const payload: []const u8 = @alignCast(body[0 .. body.len - trailer_size]);
-        if (element_size == 0) {
-            assert(payload.len == 0);
-        } else {
-            assert(payload.len % element_size == 0);
+        const payload: []const u8 = body[0 .. body.len - trailer_size];
+        if ((element_size > 0 and payload.len % element_size != 0) or
+            (element_size == 0 and payload.len != 0))
+        {
+            return error.BatchInvalid;
+        }
+        if (!std.mem.isAligned(
+            @intFromPtr(body[body.len - trailer_size ..].ptr),
+            @alignOf(u16),
+        )) {
+            return error.BatchInvalid;
         }
 
         const batch_events: []const u16 = @alignCast(
             std.mem.bytesAsSlice(u16, body[body.len - trailer_size ..]),
         );
-        assert(batch_events.len >= batch_count);
+        if (batch_events.len < batch_count) return error.BatchInvalid;
 
-        const batch_events_used = batch_events[batch_events.len - batch_count ..];
+        const batch_events_used: []const u16 = batch_events[batch_events.len - batch_count ..];
         assert(batch_events_used.len == batch_count);
 
-        if (constants.verify) {
-            if (batch_events.len > batch_count) {
-                // MaxInt is used as sentinel for the extra slots used for alignment.
-                assert(std.mem.allEqual(
-                    u16,
-                    batch_events[0 .. batch_events.len - batch_count],
-                    std.math.maxInt(u16),
-                ));
-            }
+        if (batch_events.len > batch_count) {
+            // MaxInt is used as sentinel for the extra slots used for alignment.
+            if (!std.mem.allEqual(
+                u16,
+                batch_events[0 .. batch_events.len - batch_count],
+                std.math.maxInt(u16),
+            )) return error.BatchInvalid;
+        }
 
-            if (element_size > 0) {
-                var events_count_total: usize = 0;
-                for (batch_events_used) |count| events_count_total += count;
-                assert(payload.len == events_count_total * element_size);
-            }
+        var events_count_total: usize = 0;
+        for (batch_events_used) |count| events_count_total += count;
+        if ((element_size > 0 and payload.len != events_count_total * element_size) or
+            (element_size == 0 and events_count_total != 0))
+        {
+            return error.BatchInvalid;
         }
 
         return .{
@@ -319,7 +329,7 @@ const test_batch = struct {
             options.element_size,
             options.buffer[0..encoder.bytes_written],
             encoder.batch_count,
-        );
+        ) catch unreachable;
         var batch_read_index: usize = 0;
         while (decoder.next()) |batch| : (batch_read_index += 1) {
             const event_count = @divExact(batch.len, options.element_size);
@@ -439,4 +449,99 @@ test "batch: maximum elements on a single batch" {
         .elements_per_batch = batch_size_max,
     });
     try testing.expectEqual(buffer_size, written_bytes);
+}
+
+test "batch: invalid format" {
+    var rng = std.rand.DefaultPrng.init(42);
+    const random = rng.random();
+
+    const element_size = 128;
+    const buffer_size = (1024 * 1024) - @sizeOf(vsr.Header); // 1MiB message.
+    const buffer = try testing.allocator.alignedAlloc(u8, @alignOf(vsr.Header), buffer_size);
+    defer testing.allocator.free(buffer);
+
+    const batch_count = 10;
+    const trailer_size = batch_trailer_total_size(.{
+        .element_size = element_size,
+        .batch_count = batch_count,
+    });
+
+    var encoder = BatchEncoder.init(element_size, buffer);
+    var event_total_count: usize = 0;
+    for (0..batch_count) |_| {
+        const event_count = random.intRangeAtMostBiased(usize, 0, 100);
+        try testing.expect(encoder.can_add(element_size * event_count));
+        encoder.add(element_size * event_count);
+        event_total_count += event_count;
+    }
+    encoder.finish();
+
+    try testing.expect(encoder.batch_count == batch_count);
+    try testing.expect(encoder.bytes_written == (element_size * event_total_count) + trailer_size);
+
+    try testing.expect(BatchDecoder.init(
+        element_size,
+        buffer[0..encoder.bytes_written],
+        10,
+    ) != error.BatchInvalid);
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size,
+        buffer[0..encoder.bytes_written],
+        batch_count + 1,
+    ));
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size,
+        buffer[0..encoder.bytes_written],
+        batch_count - 1,
+    ));
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size,
+        buffer[0 .. encoder.bytes_written - element_size],
+        batch_count,
+    ));
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size,
+        buffer[element_size..encoder.bytes_written],
+        batch_count,
+    ));
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size,
+        buffer[0 .. encoder.bytes_written - element_size],
+        batch_count,
+    ));
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size,
+        buffer[1 .. encoder.bytes_written + 1],
+        batch_count,
+    ));
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size,
+        buffer[0 .. encoder.bytes_written + 1],
+        batch_count,
+    ));
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size,
+        buffer[1..encoder.bytes_written],
+        batch_count,
+    ));
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size + 1,
+        buffer[0..encoder.bytes_written],
+        batch_count,
+    ));
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size - 1,
+        buffer[0..encoder.bytes_written],
+        batch_count,
+    ));
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size * 2,
+        buffer[0..encoder.bytes_written],
+        batch_count,
+    ));
+    try testing.expectError(error.BatchInvalid, BatchDecoder.init(
+        element_size / 2,
+        buffer[0..encoder.bytes_written],
+        batch_count,
+    ));
 }
