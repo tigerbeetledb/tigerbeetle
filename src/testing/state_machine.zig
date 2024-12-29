@@ -339,6 +339,7 @@ fn WorkloadType(comptime StateMachine: type) type {
         ) struct {
             operation: StateMachine.Operation,
             size: usize,
+            batch_count: u16,
         } {
             _ = client_index;
 
@@ -351,6 +352,7 @@ fn WorkloadType(comptime StateMachine: type) type {
             return .{
                 .operation = .echo,
                 .size = size,
+                .batch_count = 0,
             };
         }
 
@@ -361,9 +363,11 @@ fn WorkloadType(comptime StateMachine: type) type {
             timestamp: u64,
             request_body: []align(@alignOf(vsr.Header)) const u8,
             reply_body: []align(@alignOf(vsr.Header)) const u8,
+            batch_count: u16,
         ) void {
             _ = client_index;
             _ = timestamp;
+            assert(batch_count == 0);
 
             workload.requests_delivered += 1;
             assert(workload.requests_delivered <= workload.requests_sent);
@@ -390,6 +394,7 @@ fn WorkloadType(comptime StateMachine: type) type {
 
             pub fn generate(random: std.rand.Random, options: struct {
                 batch_size_limit: u32,
+                batch_per_request_limit: u32,
                 client_count: usize,
                 in_flight_max: usize,
             }) Options {

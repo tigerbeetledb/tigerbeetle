@@ -305,6 +305,7 @@ pub fn WorkloadType(comptime AccountingStateMachine: type) type {
         ) struct {
             operation: Operation,
             size: usize,
+            batch_count: u16,
         } {
             assert(client_index < self.auditor.options.client_count);
             assert(body.len == constants.message_size_max - @sizeOf(vsr.Header));
@@ -328,34 +329,133 @@ pub fn WorkloadType(comptime AccountingStateMachine: type) type {
                 };
             };
 
-            const size = switch (action) {
-                .create_accounts => @sizeOf(tb.Account) * self.build_create_accounts(
-                    client_index,
-                    self.batch(tb.Account, action, body),
-                ),
-                .create_transfers => @sizeOf(tb.Transfer) * self.build_create_transfers(
-                    client_index,
-                    self.batch(tb.Transfer, action, body),
-                ),
-                .lookup_accounts => @sizeOf(u128) *
-                    self.build_lookup_accounts(self.batch(u128, action, body)),
-                .lookup_transfers => @sizeOf(u128) *
-                    self.build_lookup_transfers(self.batch(u128, action, body)),
-                .get_account_transfers, .get_account_balances => @sizeOf(tb.AccountFilter) *
-                    self.build_get_account_filter(self.batch(tb.AccountFilter, action, body)),
-                inline .query_accounts,
-                .query_transfers,
-                => |action_comptime| @sizeOf(tb.QueryFilter) * self.build_query_filter(
-                    action_comptime,
-                    self.batch(tb.QueryFilter, action, body),
-                ),
-            };
-            assert(size <= body.len);
+            const operation: Operation = @enumFromInt(@intFromEnum(action));
+            const batched = self.random.boolean() and
+                AccountingStateMachine.event_is_slice(operation);
+            if (batched) {
+                assert(AccountingStateMachine.event_is_slice(operation));
+                const event_size: usize = switch (operation) {
+                    inline else => |operation_comptime| @sizeOf(
+                        AccountingStateMachine.EventType(operation_comptime),
+                    ),
+                };
+                const event_count_max: usize = switch (operation) {
+                    .create_accounts,
+                    .lookup_accounts,
+                    => @divFloor(self.options.batch_size_limit, @sizeOf(tb.Account)),
+                    .create_transfers,
+                    .lookup_transfers,
+                    => @divFloor(self.options.batch_size_limit, @sizeOf(tb.Transfer)),
+                    .pulse,
+                    .get_account_transfers,
+                    .get_account_balances,
+                    .query_accounts,
+                    .query_transfers,
+                    => unreachable,
+                };
 
-            return .{
-                .operation = @as(Operation, @enumFromInt(@intFromEnum(action))),
-                .size = size,
-            };
+                var encoder = vsr.batch.BatchEncoder.init(
+                    event_size,
+                    body[0 .. event_size * event_count_max],
+                );
+
+                var event_count: usize = 0;
+                for (0..self.options.batch_per_request_limit) |_| {
+                    if (encoder.writable().len == 0) break;
+                    switch (action) {
+                        .create_accounts => {
+                            const batchable = self.batch(tb.Account, action, encoder.writable());
+                            if (!encoder.can_add(batchable.len * event_size)) break;
+
+                            const count = self.build_create_accounts(
+                                client_index,
+                                batchable,
+                            );
+                            assert(count <= batchable.len);
+                            encoder.add(count * event_size);
+                            event_count += count;
+                        },
+                        .create_transfers => {
+                            const batchable = self.batch(tb.Transfer, action, encoder.writable());
+                            if (!encoder.can_add(batchable.len * event_size)) break;
+
+                            const count = self.build_create_transfers(
+                                client_index,
+                                batchable,
+                            );
+                            assert(count <= batchable.len);
+                            encoder.add(count * event_size);
+                            event_count += count;
+                        },
+                        .lookup_accounts => {
+                            const batchable = self.batch(u128, action, encoder.writable());
+                            if (!encoder.can_add(batchable.len * event_size)) break;
+
+                            const count = self.build_lookup_accounts(batchable);
+                            assert(count <= batchable.len);
+                            encoder.add(count * event_size);
+                            event_count += count;
+                        },
+                        .lookup_transfers => {
+                            const batchable = self.batch(u128, action, encoder.writable());
+                            if (!encoder.can_add(batchable.len * event_size)) break;
+
+                            const count = self.build_lookup_transfers(batchable);
+                            assert(count <= batchable.len);
+                            encoder.add(count * event_size);
+                            event_count += count;
+                        },
+                        .get_account_transfers,
+                        .get_account_balances,
+                        .query_accounts,
+                        .query_transfers,
+                        => unreachable,
+                    }
+                }
+                maybe(event_count == 0);
+                assert(event_count < event_count_max);
+                assert(encoder.batch_count > 0);
+                assert(encoder.batch_count <= self.options.batch_per_request_limit);
+
+                encoder.finish();
+                assert(encoder.bytes_written <= self.options.batch_size_limit);
+
+                return .{
+                    .operation = operation,
+                    .size = encoder.bytes_written,
+                    .batch_count = encoder.batch_count,
+                };
+            } else {
+                const size = switch (action) {
+                    .create_accounts => @sizeOf(tb.Account) * self.build_create_accounts(
+                        client_index,
+                        self.batch(tb.Account, action, body),
+                    ),
+                    .create_transfers => @sizeOf(tb.Transfer) * self.build_create_transfers(
+                        client_index,
+                        self.batch(tb.Transfer, action, body),
+                    ),
+                    .lookup_accounts => @sizeOf(u128) *
+                        self.build_lookup_accounts(self.batch(u128, action, body)),
+                    .lookup_transfers => @sizeOf(u128) *
+                        self.build_lookup_transfers(self.batch(u128, action, body)),
+                    .get_account_transfers, .get_account_balances => @sizeOf(tb.AccountFilter) *
+                        self.build_get_account_filter(self.batch(tb.AccountFilter, action, body)),
+                    inline .query_accounts,
+                    .query_transfers,
+                    => |action_comptime| @sizeOf(tb.QueryFilter) * self.build_query_filter(
+                        action_comptime,
+                        self.batch(tb.QueryFilter, action, body),
+                    ),
+                };
+                assert(size <= body.len);
+
+                return .{
+                    .operation = operation,
+                    .size = size,
+                    .batch_count = 0,
+                };
+            }
         }
 
         /// `on_reply` is called for replies in commit order.
@@ -364,63 +464,146 @@ pub fn WorkloadType(comptime AccountingStateMachine: type) type {
             client_index: usize,
             operation: AccountingStateMachine.Operation,
             timestamp: u64,
-            request_body: []align(@alignOf(vsr.Header)) const u8,
-            reply_body: []align(@alignOf(vsr.Header)) const u8,
+            request_body: []const u8,
+            reply_body: []const u8,
+            batch_count: u16,
         ) void {
             assert(timestamp != 0);
             assert(request_body.len <= constants.message_size_max - @sizeOf(vsr.Header));
             assert(reply_body.len <= constants.message_size_max - @sizeOf(vsr.Header));
 
+            if (batch_count > 0) {
+                const event_size: usize, const result_size: usize =
+                    switch (operation) {
+                    .pulse => unreachable,
+                    inline else => |operation_comptime| .{
+                        @sizeOf(AccountingStateMachine.EventType(operation_comptime)),
+                        @sizeOf(AccountingStateMachine.ResultType(operation_comptime)),
+                    },
+                };
+
+                const prepare_nanoseconds = struct {
+                    fn prepare_nanoseconds(
+                        operation_inner: AccountingStateMachine.Operation,
+                        input_len: usize,
+                    ) u64 {
+                        return switch (operation_inner) {
+                            .pulse => 0,
+                            .create_accounts => @divExact(input_len, @sizeOf(tb.Account)),
+                            .create_transfers => @divExact(input_len, @sizeOf(tb.Transfer)),
+                            .lookup_accounts => 0,
+                            .lookup_transfers => 0,
+                            .get_account_transfers => 0,
+                            .get_account_balances => 0,
+                            .query_accounts => 0,
+                            .query_transfers => 0,
+                        };
+                    }
+                }.prepare_nanoseconds;
+
+                var body_decoder = vsr.batch.BatchDecoder.init(
+                    event_size,
+                    request_body,
+                    batch_count,
+                ) catch unreachable;
+                var reply_decoder = vsr.batch.BatchDecoder.init(
+                    result_size,
+                    reply_body,
+                    batch_count,
+                ) catch unreachable;
+
+                var batch_timestamp: u64 = timestamp - prepare_nanoseconds(
+                    operation,
+                    body_decoder.payload.len,
+                );
+                var batch_count_processed: u16 = 0;
+                while (body_decoder.next()) |batch_body| {
+                    const batch_reply = reply_decoder.next().?;
+                    batch_timestamp += prepare_nanoseconds(
+                        operation,
+                        batch_body.len,
+                    );
+
+                    self.on_reply_batch(
+                        client_index,
+                        operation,
+                        batch_timestamp,
+                        batch_body,
+                        batch_reply,
+                    );
+                    batch_count_processed += 1;
+                }
+                assert(reply_decoder.next() == null);
+                assert(batch_count_processed == batch_count);
+            } else {
+                self.on_reply_batch(
+                    client_index,
+                    operation,
+                    timestamp,
+                    request_body,
+                    reply_body,
+                );
+            }
+        }
+
+        pub fn on_reply_batch(
+            self: *Workload,
+            client_index: usize,
+            operation: AccountingStateMachine.Operation,
+            timestamp: u64,
+            request_body: []const u8,
+            reply_body: []const u8,
+        ) void {
             switch (operation) {
                 .create_accounts => self.auditor.on_create_accounts(
                     client_index,
                     timestamp,
-                    std.mem.bytesAsSlice(tb.Account, request_body),
-                    std.mem.bytesAsSlice(tb.CreateAccountsResult, reply_body),
+                    @alignCast(std.mem.bytesAsSlice(tb.Account, request_body)),
+                    @alignCast(std.mem.bytesAsSlice(tb.CreateAccountsResult, reply_body)),
                 ),
                 .create_transfers => self.on_create_transfers(
                     client_index,
                     timestamp,
-                    std.mem.bytesAsSlice(tb.Transfer, request_body),
-                    std.mem.bytesAsSlice(tb.CreateTransfersResult, reply_body),
+                    @alignCast(std.mem.bytesAsSlice(tb.Transfer, request_body)),
+                    @alignCast(std.mem.bytesAsSlice(tb.CreateTransfersResult, reply_body)),
                 ),
                 .lookup_accounts => self.auditor.on_lookup_accounts(
                     client_index,
                     timestamp,
-                    std.mem.bytesAsSlice(u128, request_body),
-                    std.mem.bytesAsSlice(tb.Account, reply_body),
+                    @alignCast(std.mem.bytesAsSlice(u128, request_body)),
+                    @alignCast(std.mem.bytesAsSlice(tb.Account, reply_body)),
                 ),
                 .lookup_transfers => self.on_lookup_transfers(
                     client_index,
                     timestamp,
-                    std.mem.bytesAsSlice(u128, request_body),
-                    std.mem.bytesAsSlice(tb.Transfer, reply_body),
+                    @alignCast(std.mem.bytesAsSlice(u128, request_body)),
+                    @alignCast(std.mem.bytesAsSlice(tb.Transfer, reply_body)),
                 ),
                 .get_account_transfers => self.on_get_account_transfers(
                     client_index,
                     timestamp,
-                    std.mem.bytesAsSlice(tb.AccountFilter, request_body),
-                    std.mem.bytesAsSlice(tb.Transfer, reply_body),
+                    @alignCast(std.mem.bytesAsSlice(tb.AccountFilter, request_body)),
+                    @alignCast(std.mem.bytesAsSlice(tb.Transfer, reply_body)),
                 ),
                 .get_account_balances => self.on_get_account_balances(
                     client_index,
                     timestamp,
-                    std.mem.bytesAsSlice(tb.AccountFilter, request_body),
-                    std.mem.bytesAsSlice(tb.AccountBalance, reply_body),
+                    @alignCast(std.mem.bytesAsSlice(tb.AccountFilter, request_body)),
+                    @alignCast(std.mem.bytesAsSlice(tb.AccountBalance, reply_body)),
                 ),
                 .query_accounts => self.on_query(
                     tb.Account,
                     client_index,
                     timestamp,
-                    std.mem.bytesAsSlice(tb.QueryFilter, request_body),
-                    std.mem.bytesAsSlice(tb.Account, reply_body),
+                    @alignCast(std.mem.bytesAsSlice(tb.QueryFilter, request_body)),
+                    @alignCast(std.mem.bytesAsSlice(tb.Account, reply_body)),
                 ),
                 .query_transfers => self.on_query(
                     tb.Transfer,
                     client_index,
                     timestamp,
-                    std.mem.bytesAsSlice(tb.QueryFilter, request_body),
-                    std.mem.bytesAsSlice(tb.Transfer, reply_body),
+                    @alignCast(std.mem.bytesAsSlice(tb.QueryFilter, request_body)),
+                    @alignCast(std.mem.bytesAsSlice(tb.Transfer, reply_body)),
                 ),
                 //Not handled by the client.
                 .pulse => unreachable,
@@ -944,7 +1127,7 @@ pub fn WorkloadType(comptime AccountingStateMachine: type) type {
             self: *const Workload,
             comptime T: type,
             action: Action,
-            body: []align(@alignOf(vsr.Header)) u8,
+            body: []u8,
         ) []T {
             const batch_min = switch (action) {
                 .create_accounts, .lookup_accounts => self.options.accounts_batch_size_min,
@@ -965,9 +1148,14 @@ pub fn WorkloadType(comptime AccountingStateMachine: type) type {
                 => 0,
             };
 
-            // +1 because the span is inclusive.
-            const batch_size = batch_min + self.random.uintLessThanBiased(usize, batch_span + 1);
-            return std.mem.bytesAsSlice(T, body)[0..batch_size];
+            const slice: []T = @alignCast(std.mem.bytesAsSlice(T, body));
+            const batch_size = @min(
+                // +1 because the span is inclusive.
+                batch_min + self.random.uintLessThanBiased(usize, batch_span + 1),
+                slice.len,
+            );
+
+            return slice[0..batch_size];
         }
 
         fn transfer_id_to_index(self: *const Workload, id: u128) usize {
@@ -1426,6 +1614,9 @@ fn OptionsType(comptime StateMachine: type, comptime Action: type) type {
     return struct {
         const Options = @This();
 
+        batch_size_limit: u32,
+        batch_per_request_limit: u32,
+
         auditor_options: Auditor.Options,
         transfer_id_permutation: IdPermutation,
 
@@ -1476,6 +1667,7 @@ fn OptionsType(comptime StateMachine: type, comptime Action: type) type {
 
         pub fn generate(random: std.rand.Random, options: struct {
             batch_size_limit: u32,
+            batch_per_request_limit: u32,
             client_count: usize,
             in_flight_max: usize,
         }) Options {
@@ -1490,6 +1682,8 @@ fn OptionsType(comptime StateMachine: type, comptime Action: type) type {
                 StateMachine.constants.batch_max.create_transfers);
 
             return .{
+                .batch_size_limit = options.batch_size_limit,
+                .batch_per_request_limit = options.batch_per_request_limit,
                 .auditor_options = .{
                     .accounts_max = 2 + random.uintLessThan(usize, 128),
                     .account_id_permutation = IdPermutation.generate(random),

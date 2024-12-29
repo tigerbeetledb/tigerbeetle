@@ -171,22 +171,14 @@ pub const BatchEncoder = struct {
         });
 
         const buffer: []u8 = self.buffer.?;
-        assert(buffer.len >= self.bytes_written + trailer_size);
-
-        return buffer[self.bytes_written .. buffer.len - trailer_size];
+        return if (buffer.len >= self.bytes_written + trailer_size)
+            buffer[self.bytes_written .. buffer.len - trailer_size]
+        else
+            &.{};
     }
 
     pub fn can_add(self: *const BatchEncoder, bytes_written: usize) bool {
-        assert(self.buffer != null);
-        assert(self.bytes_written % self.element_size == 0);
-
-        const trailer_size = batch_trailer_total_size(.{
-            .element_size = self.element_size,
-            .batch_count = self.batch_count + 1,
-        });
-
-        const buffer: []u8 = self.buffer.?;
-        return buffer.len >= self.bytes_written + bytes_written + trailer_size;
+        return self.writable().len >= bytes_written;
     }
 
     pub fn add(self: *BatchEncoder, bytes_written: usize) void {
