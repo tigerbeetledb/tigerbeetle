@@ -262,6 +262,14 @@ pub const BatchEncoder = struct {
         self.buffer = null;
         self.bytes_written = self.bytes_written + trailer_size;
         assert(self.bytes_written % self.element_size == 0);
+
+        if (constants.verify) {
+            assert(BatchDecoder.init(
+                self.element_size,
+                buffer[0..self.bytes_written],
+                self.batch_count,
+            ) != error.BatchInvalid);
+        }
     }
 };
 
