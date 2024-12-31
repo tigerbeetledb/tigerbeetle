@@ -613,6 +613,28 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
             }
         }
 
+        /// Returns whether the forest contains this table (ignoring snapshot_max) at any level.
+        pub fn contains_table(
+            forest: *const Forest,
+            table: *const schema.ManifestNode.TableInfo,
+        ) bool {
+            switch (tree_id_cast(table.tree_id)) {
+                inline else => |tree_id| {
+                    const tree = forest.tree_for_id_const(tree_id);
+                    const Tree = Forest.TreeForIdType(tree_id);
+                    const tree_table = Tree.Manifest.TreeTableInfo.decode(table);
+                    for (&tree.manifest.levels) |manifest_level| {
+                        if (manifest_level.find(&tree_table)) |level_table| {
+                            assert(table.checksum == level_table.table_info.checksum);
+                            assert(table.snapshot_max <= level_table.table_info.snapshot_max);
+                            return true;
+                        }
+                    }
+                    return false;
+                },
+            }
+        }
+
         /// Verify that `ManifestLog.table_extents` has an extent for every active table.
         ///
         /// (Invoked between beats.)

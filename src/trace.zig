@@ -100,12 +100,14 @@ const assert = std.debug.assert;
 const log = std.log.scoped(.trace);
 
 const constants = @import("constants.zig");
+const sync = @import("vsr/sync.zig");
 
 const trace_span_size_max = 1024;
 
 pub const Event = union(enum) {
     replica_commit,
     replica_aof_write,
+    replica_sync_stage,
     replica_sync_table: struct { index: usize },
 
     compact_beat,
@@ -147,6 +149,7 @@ pub const Event = union(enum) {
     const event_stack_cardinality = std.enums.EnumArray(EventTag, u32).init(.{
         .replica_commit = 1,
         .replica_aof_write = 1,
+        .replica_sync_stage = 1,
         .replica_sync_table = constants.grid_missing_tables_max,
         .compact_beat = 1,
         .compact_beat_merge = 1,

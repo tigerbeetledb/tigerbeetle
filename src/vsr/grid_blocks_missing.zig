@@ -11,8 +11,10 @@
 //!   corrupt blocks.
 const std = @import("std");
 const assert = std.debug.assert;
+const maybe = stdx.maybe;
 
 const constants = @import("../constants.zig");
+const stdx = @import("../stdx.zig");
 const schema = @import("../lsm/schema.zig");
 const vsr = @import("../vsr.zig");
 
@@ -42,6 +44,10 @@ pub const GridBlocksMissing = struct {
 
     const FaultProgress = union(enum) {
         /// Repair a single block.
+        ///
+        /// Originates from one of:
+        /// - the grid scrubber
+        /// - a grid read during prefetch/compaction
         block,
         /// Repair the table and all of its content. Awaiting table index block.
         table_index: TableIndex,
@@ -55,6 +61,7 @@ pub const GridBlocksMissing = struct {
     pub const RepairTable = struct {
         index_address: u64,
         index_checksum: u128,
+        table_info: schema.ManifestNode.TableInfo,
         /// Invariants:
         /// - data_blocks_received.count < table_blocks_total
         /// TODO(Congestion control): This bitset is currently used only for extra validation.
@@ -85,6 +92,8 @@ pub const GridBlocksMissing = struct {
     /// Invariants:
     /// - For every block address in faulty_blocks, ¬free_set.is_free(address).
     faulty_blocks: FaultyBlocks,
+    faulty_blocks_count_max: u32,
+
     /// Index within `faulty_blocks`, used to cycle through block-repair requests.
     ///
     /// Invariants:
@@ -93,20 +102,38 @@ pub const GridBlocksMissing = struct {
     faulty_blocks_repair_index: usize = 0,
 
     /// Invariants:
-    /// - enqueued_blocks_table + enqueued_blocks_single = faulty_blocks.count()
+    /// - enqueued_blocks_table + enqueued_blocks_single =
+    ///   faulty_blocks.count() + syncing_faulty_blocks.count()
     /// - enqueued_blocks_table ≤ options.tables_max * lsm_table_content_blocks_max
     enqueued_blocks_single: usize = 0,
     enqueued_blocks_table: usize = 0,
 
     /// Invariants:
     /// - For every index address in faulty_tables: ¬free_set.is_free(address).
+    /// - A given RepairTable is never in both `faulty_tables` and `faulty_tables_free`
+    ///   simultaneously.
+    /// - `faulty_tables` does not contain multiple items with the same underlying table
+    ///   (address/checksum).
     faulty_tables: FIFOType(RepairTable) = .{ .name = "grid_missing_blocks_tables" },
     faulty_tables_free: FIFOType(RepairTable) = .{ .name = "grid_missing_blocks_tables_free" },
 
-    checkpointing: ?struct {
-        /// The number of faulty_blocks with state=aborting.
-        aborting: usize,
-    } = null,
+    state: union(enum) {
+        repairing,
+        /// Set while the replica is syncing its superblock.
+        /// While `syncing`, only repair single blocks, not tables.
+        ///
+        /// (Tables are temporarily in `syncing_faulty_blocks` rather than `faulty_blocks` -- they
+        /// may or may not belong in the new (upcoming) checkpoint.)
+        syncing,
+        checkpointing: struct {
+            /// The number of faulty_blocks with state=aborting.
+            aborting: usize,
+        },
+    } = .repairing,
+
+    /// On `sync_commence()` and `sync_complete()`, swap this with `faulty_blocks` so that the
+    /// (possibly invalid) table blocks don't interfere.
+    syncing_faulty_blocks: FaultyBlocks,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -115,21 +142,97 @@ pub const GridBlocksMissing = struct {
         var faulty_blocks = FaultyBlocks{};
         errdefer faulty_blocks.deinit(allocator);
 
-        try faulty_blocks.ensureTotalCapacity(
-            allocator,
-            options.blocks_max + options.tables_max * constants.lsm_table_data_blocks_max,
-        );
+        var syncing_faulty_blocks = FaultyBlocks{};
+        errdefer syncing_faulty_blocks.deinit(allocator);
+
+        try faulty_blocks.ensureTotalCapacity(allocator, options.blocks_max +
+            options.tables_max * constants.lsm_table_data_blocks_max);
+        try syncing_faulty_blocks.ensureTotalCapacity(allocator, options.blocks_max);
 
         return GridBlocksMissing{
             .options = options,
             .faulty_blocks = faulty_blocks,
+            .faulty_blocks_count_max = @intCast(faulty_blocks.capacity()),
+            .syncing_faulty_blocks = syncing_faulty_blocks,
         };
     }
 
     pub fn deinit(queue: *GridBlocksMissing, allocator: std.mem.Allocator) void {
+        queue.syncing_faulty_blocks.deinit(allocator);
         queue.faulty_blocks.deinit(allocator);
 
         queue.* = undefined;
+    }
+
+    pub fn verify(queue: *const GridBlocksMissing) void {
+        assert(queue.faulty_blocks.count() + queue.syncing_faulty_blocks.count() ==
+            queue.enqueued_blocks_single + queue.enqueued_blocks_table);
+        assert(queue.faulty_blocks_repair_index == 0 or
+            queue.faulty_blocks_repair_index < queue.faulty_blocks.count());
+
+        var enqueued_blocks_single: u32 = 0;
+        var enqueued_blocks_table: u32 = 0;
+        var enqueued_blocks_aborting: u32 = 0;
+        for ([_]FaultyBlocks{ queue.faulty_blocks, queue.syncing_faulty_blocks }) |faulty_blocks| {
+            var faulty_blocks_iterator = faulty_blocks.iterator();
+            while (faulty_blocks_iterator.next()) |fault_entry| {
+                const fault = fault_entry.value_ptr;
+                switch (fault.progress) {
+                    .block => enqueued_blocks_single += 1,
+                    .table_index => enqueued_blocks_table += 1,
+                    .table_data => enqueued_blocks_table += 1,
+                }
+                enqueued_blocks_aborting += @intFromBool(fault.state == .aborting);
+
+                switch (fault.progress) {
+                    .block => {},
+                    inline .table_index, .table_data => |progress| {
+                        // These are not exclusive because the replica may reuse a RepairTable while
+                        // we are still aborting the old blocks.
+                        assert(queue.faulty_tables.contains(progress.table) or
+                            (fault.state == .aborting));
+                    },
+                }
+            }
+        }
+        assert(queue.enqueued_blocks_single == enqueued_blocks_single);
+        assert(queue.enqueued_blocks_table == enqueued_blocks_table);
+        if (enqueued_blocks_table == 0) assert(queue.faulty_tables.empty());
+        if (queue.state != .syncing) assert(queue.syncing_faulty_blocks.count() == 0);
+
+        if (queue.state == .checkpointing) {
+            assert(enqueued_blocks_aborting == queue.state.checkpointing.aborting);
+        } else {
+            assert(enqueued_blocks_aborting == 0);
+        }
+
+        var faulty_tables_free = queue.faulty_tables_free.peek();
+        while (faulty_tables_free) |table_free| {
+            assert(!queue.faulty_tables.contains(table_free));
+            faulty_tables_free = table_free.next;
+        }
+    }
+
+    pub fn cancel(queue: *GridBlocksMissing) void {
+        queue.verify();
+        defer queue.verify();
+
+        var faulty_blocks = queue.faulty_blocks.iterator();
+        while (faulty_blocks.next()) |fault_entry| {
+            const fault = fault_entry.value_ptr;
+            assert(fault.state != .aborting);
+
+            if (fault.state == .writing) {
+                // Due to Grid.cancel() this write may not actually take place.
+                fault.state = .waiting;
+
+                if (fault.progress == .table_data) {
+                    const progress = &fault.progress.table_data;
+                    assert(progress.table.data_blocks_received.isSet(progress.index));
+                    progress.table.data_blocks_received.unset(progress.index);
+                }
+            }
+        }
     }
 
     /// When the queue wants more blocks than fit in a single request message, successive calls
@@ -153,18 +256,20 @@ pub const GridBlocksMissing = struct {
             const fault_index =
                 (queue.faulty_blocks_repair_index + fault_offset) % faults_total;
 
-            switch (fault_data[fault_index].state) {
+            const fault = &fault_data[fault_index];
+            switch (fault.state) {
                 .waiting => {
-                    requests[requests_count] = .{
-                        .block_address = fault_addresses[fault_index],
-                        .block_checksum = fault_data[fault_index].checksum,
-                    };
-                    requests_count += 1;
-
-                    if (requests_count == requests.len) break;
+                    if (queue.state != .syncing or fault.progress == .block) {
+                        requests[requests_count] = .{
+                            .block_address = fault_addresses[fault_index],
+                            .block_checksum = fault.checksum,
+                        };
+                        requests_count += 1;
+                        if (requests_count == requests.len) break;
+                    }
                 },
                 .writing => {},
-                .aborting => assert(queue.checkpointing.?.aborting > 0),
+                .aborting => assert(queue.state.checkpointing.aborting > 0),
             }
         }
 
@@ -185,13 +290,13 @@ pub const GridBlocksMissing = struct {
     /// Count the number of *non-table* block repairs available.
     pub fn enqueue_blocks_available(queue: *const GridBlocksMissing) usize {
         assert(queue.faulty_tables.count <= queue.options.tables_max);
-        assert(queue.faulty_blocks.count() ==
+        assert(queue.faulty_blocks.count() + queue.syncing_faulty_blocks.count() ==
             queue.enqueued_blocks_single + queue.enqueued_blocks_table);
         assert(queue.enqueued_blocks_table <=
             queue.options.tables_max * constants.lsm_table_data_blocks_max);
 
         const faulty_blocks_free =
-            queue.faulty_blocks.capacity() -
+            queue.faulty_blocks_count_max -
             queue.enqueued_blocks_single -
             queue.options.tables_max * constants.lsm_table_data_blocks_max;
         return faulty_blocks_free;
@@ -201,22 +306,26 @@ pub const GridBlocksMissing = struct {
     pub fn enqueue_block(queue: *GridBlocksMissing, address: u64, checksum: u128) void {
         assert(queue.enqueue_blocks_available() > 0);
         assert(queue.faulty_tables.count <= queue.options.tables_max);
-        assert(queue.faulty_blocks.count() ==
+        assert(queue.faulty_blocks.count() + queue.syncing_faulty_blocks.count() ==
             queue.enqueued_blocks_single + queue.enqueued_blocks_table);
 
         const enqueue = queue.enqueue_faulty_block(address, checksum, .block);
-        assert(enqueue == .insert or enqueue == .duplicate);
+        assert(enqueue == .insert or enqueue == .duplicate or
+            (enqueue == .replace and queue.state == .syncing));
     }
 
     pub fn enqueue_table(
         queue: *GridBlocksMissing,
         table: *RepairTable,
-        address: u64,
-        checksum: u128,
+        table_info: *const schema.ManifestNode.TableInfo,
     ) enum { insert, duplicate } {
+        assert(queue.state == .repairing or queue.state == .checkpointing);
         assert(queue.faulty_tables.count < queue.options.tables_max);
         assert(queue.faulty_blocks.count() ==
             queue.enqueued_blocks_single + queue.enqueued_blocks_table);
+
+        const address = table_info.address;
+        const checksum = table_info.checksum;
 
         var tables = queue.faulty_tables.peek();
         while (tables) |queue_table| : (tables = queue_table.next) {
@@ -234,6 +343,7 @@ pub const GridBlocksMissing = struct {
         table.* = .{
             .index_address = address,
             .index_checksum = checksum,
+            .table_info = table_info.*,
         };
         queue.faulty_tables.push(table);
 
@@ -255,11 +365,11 @@ pub const GridBlocksMissing = struct {
         duplicate,
     } {
         assert(queue.faulty_tables.count <= queue.options.tables_max);
-        assert(queue.faulty_blocks.count() ==
+        assert(queue.faulty_blocks.count() + queue.syncing_faulty_blocks.count() ==
             queue.enqueued_blocks_single + queue.enqueued_blocks_table);
 
         defer {
-            assert(queue.faulty_blocks.count() ==
+            assert(queue.faulty_blocks.count() + queue.syncing_faulty_blocks.count() ==
                 queue.enqueued_blocks_single + queue.enqueued_blocks_table);
         }
 
@@ -299,6 +409,14 @@ pub const GridBlocksMissing = struct {
         }
     }
 
+    pub fn idle(queue: *const GridBlocksMissing) bool {
+        return queue.sync_idle() and queue.enqueued_blocks_single == 0;
+    }
+
+    pub fn sync_idle(queue: *const GridBlocksMissing) bool {
+        return queue.state == .syncing or queue.enqueued_blocks_table == 0;
+    }
+
     pub fn repair_waiting(queue: *const GridBlocksMissing, address: u64, checksum: u128) bool {
         const fault_index = queue.faulty_blocks.getIndex(address) orelse return false;
         const fault = &queue.faulty_blocks.entries.items(.value)[fault_index];
@@ -307,11 +425,14 @@ pub const GridBlocksMissing = struct {
 
     pub fn repair_commence(queue: *const GridBlocksMissing, address: u64, checksum: u128) void {
         assert(queue.repair_waiting(address, checksum));
+        maybe(queue.state == .checkpointing);
+        maybe(queue.state == .syncing);
 
         const fault_index = queue.faulty_blocks.getIndex(address).?;
         const fault = &queue.faulty_blocks.entries.items(.value)[fault_index];
         assert(fault.checksum == checksum);
         assert(fault.state == .waiting);
+        assert(fault.progress == .block or queue.state != .syncing);
 
         if (fault.progress == .table_data) {
             const progress = &fault.progress.table_data;
@@ -332,17 +453,21 @@ pub const GridBlocksMissing = struct {
         assert(fault_address == block_header.address);
         assert(fault.checksum == block_header.checksum);
         assert(fault.state == .aborting or fault.state == .writing);
+        assert(fault.progress == .block or queue.state != .syncing);
 
         queue.release_fault(fault_index);
 
         if (fault.state == .aborting) {
-            queue.checkpointing.?.aborting -= 1;
+            queue.state.checkpointing.aborting -= 1;
             return;
         }
 
         switch (fault.progress) {
-            .block => {},
+            .block => {
+                maybe(queue.state == .syncing);
+            },
             .table_index => |progress| {
+                assert(queue.state != .syncing);
                 assert(progress.table.data_blocks_received.count() == 0);
 
                 // The reason that the data blocks are queued here (when the write ends) rather
@@ -351,6 +476,7 @@ pub const GridBlocksMissing = struct {
                 queue.enqueue_table_data(fault.progress.table_index.table, block);
             },
             .table_data => |progress| {
+                assert(queue.state != .syncing);
                 assert(progress.table.data_blocks_received.isSet(progress.index));
             },
         }
@@ -377,6 +503,7 @@ pub const GridBlocksMissing = struct {
         table: *RepairTable,
         index_block_data: BlockPtrConst,
     ) void {
+        assert(queue.state != .syncing);
         assert(queue.faulty_blocks.count() ==
             queue.enqueued_blocks_single + queue.enqueued_blocks_table);
         assert(table.table_blocks_total == null);
@@ -428,25 +555,104 @@ pub const GridBlocksMissing = struct {
         }
     }
 
-    pub fn cancel(queue: *GridBlocksMissing) void {
-        assert(queue.checkpointing == null);
+    pub fn sync_commence(queue: *GridBlocksMissing) void {
+        // The replica may call sync_commence() without ever calling sync_complete() if it syncs
+        // multiple checkpoints without successfully opening the state machine.
+        assert(queue.state == .repairing or queue.state == .syncing);
+        queue.verify();
+        defer if (constants.verify) queue.verify();
 
-        queue.faulty_blocks.clearRetainingCapacity();
-        while (queue.faulty_tables.pop()) |table| {
-            queue.faulty_tables_free.push(table);
+        // Release the "single" blocks since when we finish syncing we have no way of checking
+        // whether they will still be valid.
+        var faulty_blocks = queue.faulty_blocks.iterator();
+        while (faulty_blocks.next()) |fault_entry| {
+            assert(fault_entry.value_ptr.state != .aborting);
+            if (fault_entry.value_ptr.progress == .block) {
+                faulty_blocks.index -= 1;
+                faulty_blocks.len -= 1;
+                queue.release_fault(faulty_blocks.index);
+            }
+        }
+        assert(queue.enqueued_blocks_single == 0);
+        assert(queue.faulty_blocks.count() + queue.syncing_faulty_blocks.count() ==
+            queue.enqueued_blocks_table);
+
+        if (queue.state == .repairing) {
+            queue.state = .syncing;
+
+            assert(queue.syncing_faulty_blocks.count() == 0);
+            std.mem.swap(FaultyBlocks, &queue.faulty_blocks, &queue.syncing_faulty_blocks);
+            queue.faulty_blocks_repair_index = 0;
+        }
+    }
+
+    /// Cancel repair for a table that does not belong in the new (sync target) checkpoint.
+    /// (Unlike checkpoint, we can't just use the free set to determine which blocks to discard.)
+    pub fn sync_table_cancel(queue: *GridBlocksMissing, table: *RepairTable) void {
+        assert(queue.state == .syncing);
+        assert(queue.faulty_tables.contains(table) != queue.faulty_tables_free.contains(table));
+
+        // The table was already cancelled/completed, it just hasn't been reclaimed yet.
+        if (queue.faulty_tables_free.contains(table)) return;
+
+        var faulty_blocks = queue.syncing_faulty_blocks.iterator();
+        while (faulty_blocks.next()) |fault_entry| {
+            const fault = fault_entry.value_ptr;
+            assert(fault.state != .aborting);
+
+            switch (fault.progress) {
+                .block => unreachable,
+                inline .table_index, .table_data => |*progress| {
+                    if (progress.table == table) {
+                        faulty_blocks.index -= 1;
+                        faulty_blocks.len -= 1;
+                        queue.enqueued_blocks_table -= 1;
+                        queue.syncing_faulty_blocks.swapRemoveAt(faulty_blocks.index);
+                    }
+                },
+            }
+        }
+        assert(queue.faulty_blocks.count() + queue.syncing_faulty_blocks.count() ==
+            queue.enqueued_blocks_table + queue.enqueued_blocks_single);
+
+        queue.faulty_tables.remove(table);
+        queue.faulty_tables_free.push(table);
+    }
+
+    pub fn sync_complete(queue: *GridBlocksMissing, free_set: *const vsr.FreeSet) void {
+        assert(queue.state == .syncing);
+        assert(free_set.opened);
+        queue.verify();
+        defer if (constants.verify) queue.verify();
+
+        queue.state = .repairing;
+        std.mem.swap(FaultyBlocks, &queue.faulty_blocks, &queue.syncing_faulty_blocks);
+
+        // Transfer any leftover block repairs (from faults incurred during since `sync_commence()`)
+        // back to `faulty_blocks`.
+        while (queue.syncing_faulty_blocks.popOrNull()) |fault_entry| {
+            assert(fault_entry.value.progress == .block);
+
+            const fault_address = fault_entry.key;
+            const fault_result = queue.faulty_blocks.getOrPutAssumeCapacity(fault_address);
+            assert(!fault_result.found_existing);
+            fault_result.value_ptr.* = fault_entry.value;
         }
 
-        queue.* = .{
-            .options = queue.options,
-            .faulty_blocks = queue.faulty_blocks,
-            .faulty_tables_free = queue.faulty_tables_free,
-        };
+        var faulty_blocks = queue.faulty_blocks.iterator();
+        while (faulty_blocks.next()) |fault_entry| {
+            const fault_address = fault_entry.key_ptr.*;
+            assert(!free_set.is_free(fault_address));
+        }
     }
 
     pub fn checkpoint_commence(queue: *GridBlocksMissing, free_set: *const vsr.FreeSet) void {
-        assert(queue.checkpointing == null);
+        assert(queue.state == .repairing);
         assert(queue.faulty_blocks.count() ==
             queue.enqueued_blocks_single + queue.enqueued_blocks_table);
+        assert(free_set.opened);
+        queue.verify();
+        defer if (constants.verify) queue.verify();
 
         var aborting: usize = 0;
 
@@ -484,18 +690,19 @@ pub const GridBlocksMissing = struct {
         }
         queue.faulty_tables = tables;
 
-        queue.checkpointing = .{ .aborting = aborting };
+        queue.state = .{ .checkpointing = .{ .aborting = aborting } };
     }
 
     /// Returns `true` when the `state≠waiting` faults for blocks that are staged to be
     /// released have finished. (All other writes can safely complete after the checkpoint.)
     pub fn checkpoint_complete(queue: *GridBlocksMissing) bool {
-        assert(queue.checkpointing != null);
+        assert(queue.state == .checkpointing);
         assert(queue.faulty_blocks.count() ==
             queue.enqueued_blocks_single + queue.enqueued_blocks_table);
+        if (constants.verify) queue.verify();
 
-        if (queue.checkpointing.?.aborting == 0) {
-            queue.checkpointing = null;
+        if (queue.state.checkpointing.aborting == 0) {
+            queue.state = .repairing;
 
             var faulty_blocks = queue.faulty_blocks.iterator();
             while (faulty_blocks.next()) |fault_entry| {

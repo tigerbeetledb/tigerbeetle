@@ -308,12 +308,19 @@ pub const StorageChecker = struct {
             } else {
                 assert(client_session.header.command == .reply);
 
+                assert(client_session.header.size >= @sizeOf(vsr.Header));
                 if (client_session.header.size == @sizeOf(vsr.Header)) {
                     // ClientReplies won't store this entry.
                 } else {
-                    checksum.add(superblock.storage.area_memory(
+                    const reply = superblock.storage.area_memory(
                         .{ .client_replies = .{ .slot = slot } },
-                    )[0..vsr.sector_ceil(client_session.header.size)]);
+                    )[0..vsr.sector_ceil(client_session.header.size)];
+
+                    const reply_header =
+                        std.mem.bytesAsValue(vsr.Header, reply[0..@sizeOf(vsr.Header)]);
+
+                    assert(reply_header.checksum == client_session.header.checksum);
+                    checksum.add(reply);
                 }
             }
         }
