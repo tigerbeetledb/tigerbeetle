@@ -87,6 +87,7 @@ pub fn main(args: fuzz.FuzzArgs) !void {
                 storage_data_written[zone.start()..][0..zone.size().?],
                 zone,
                 0,
+                .{},
             );
 
             storage.tick();

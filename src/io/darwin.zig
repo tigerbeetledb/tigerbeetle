@@ -1,12 +1,12 @@
 const std = @import("std");
-const os = std.os;
 const posix = std.posix;
 const mem = std.mem;
 const assert = std.debug.assert;
 const log = std.log.scoped(.io);
 
+const stdx = @import("../stdx.zig");
 const constants = @import("../constants.zig");
-const FIFO = @import("../fifo.zig").FIFO;
+const FIFOType = @import("../fifo.zig").FIFOType;
 const Time = @import("../time.zig").Time;
 const buffer_limit = @import("../io.zig").buffer_limit;
 const DirectIO = @import("../io.zig").DirectIO;
@@ -15,9 +15,9 @@ pub const IO = struct {
     kq: fd_t,
     time: Time = .{},
     io_inflight: usize = 0,
-    timeouts: FIFO(Completion) = .{ .name = "io_timeouts" },
-    completed: FIFO(Completion) = .{ .name = "io_completed" },
-    io_pending: FIFO(Completion) = .{ .name = "io_pending" },
+    timeouts: FIFOType(Completion) = .{ .name = "io_timeouts" },
+    completed: FIFOType(Completion) = .{ .name = "io_completed" },
+    io_pending: FIFOType(Completion) = .{ .name = "io_pending" },
 
     pub fn init(entries: u12, flags: u32) !IO {
         _ = entries;
@@ -235,7 +235,6 @@ pub const IO = struct {
             buf: [*]const u8,
             len: u32,
             offset: u64,
-            dsync: bool,
         },
     };
 
@@ -290,6 +289,10 @@ pub const IO = struct {
             .timeout => self.timeouts.push(completion),
             else => self.completed.push(completion),
         }
+    }
+
+    pub fn cancel_all(_: *IO) void {
+        // TODO Cancel in-flight async IO and wait for all completions.
     }
 
     pub const AcceptError = posix.AcceptError || posix.SetSockOptError;
@@ -380,7 +383,7 @@ pub const IO = struct {
                         .BADF => error.FileDescriptorInvalid,
                         .INTR => {}, // A success, see https://github.com/ziglang/zig/issues/2425
                         .IO => error.InputOutput,
-                        else => |errno| posix.unexpectedErrno(errno),
+                        else => |errno| stdx.unexpected_errno("close", errno),
                     };
                 }
             },
@@ -432,8 +435,7 @@ pub const IO = struct {
         );
     }
 
-    // Can't happen - but keep the same signature as Linux.
-    pub const FsyncError = posix.UnexpectedError;
+    pub const FsyncError = posix.SyncError || posix.UnexpectedError;
 
     pub fn fsync(
         self: *IO,
@@ -457,11 +459,12 @@ pub const IO = struct {
             },
             struct {
                 fn do_operation(op: anytype) FsyncError!void {
-                    fs_sync(op.fd);
+                    return fs_sync(op.fd);
                 }
             },
         );
     }
+
     pub const OpenatError = posix.OpenError || posix.UnexpectedError;
 
     pub const ReadError = error{
@@ -526,7 +529,7 @@ pub const IO = struct {
                             .OVERFLOW => error.Unseekable,
                             .SPIPE => error.Unseekable,
                             .TIMEDOUT => error.ConnectionTimedOut,
-                            else => |err| posix.unexpectedErrno(err),
+                            else => |err| stdx.unexpected_errno("read", err),
                         };
                     }
                 }
@@ -685,7 +688,7 @@ pub const IO = struct {
                     // completed.
                     const result = posix.pwrite(op.fd, op.buf[0..op.len], op.offset);
                     if (op.dsync) {
-                        fs_sync(op.fd);
+                        try fs_sync(op.fd);
                     }
 
                     return result;
@@ -745,10 +748,6 @@ pub const IO = struct {
         // TODO Use O_EXCL when opening as a block device to obtain a mandatory exclusive lock.
         // This is much stronger than an advisory exclusive lock, and is required on some platforms.
 
-        // Normally, O_DSYNC enables us to omit fsync() calls in the data plane, since we sync to
-        // the disk on every write, but that's not the case for Darwin:
-        // https://x.com/TigerBeetleDB/status/1536628729031581697
-        // To work around this, fs_sync() is explicitly called after writing in do_operation.
         var flags: posix.O = .{
             .CLOEXEC = true,
             .ACCMODE = if (method == .open_read_only) .RDONLY else .RDWR,
@@ -756,6 +755,10 @@ pub const IO = struct {
             // Even though DSYNC false is the default, spell it out here explicitly. Non-grid writes
             // are flushed immediately after writing with fs_sync. Grid writes aren't, and are
             // flushed before returning from compaction after each beat.
+            //
+            // In any case, DSYNC is broken on Darwin:
+            // https://x.com/TigerBeetleDB/status/1536628729031581697
+            // To work around this, fs_sync() is explicitly called after writing in do_operation.
             .DSYNC = false,
         };
         var mode: posix.mode_t = 0;
@@ -813,12 +816,12 @@ pub const IO = struct {
         // making decisions on data that was never durably written by a previously crashed process.
         // We therefore always fsync when we open the path, also to wait for any pending O_DSYNC.
         // Thanks to Alex Miller from FoundationDB for diving into our source and pointing this out.
-        fs_sync(fd);
+        try fs_sync(fd);
 
         // We fsync the parent directory to ensure that the file inode is durably written.
         // The caller is responsible for the parent directory inode stored under the grandparent.
         // We always do this when opening because we don't know if this was done before crashing.
-        fs_sync(dir_fd);
+        try fs_sync(dir_fd);
 
         // TODO Document that `size` is now `data_file_size_min` from `main.zig`.
         const stat = try posix.fstat(fd);
@@ -830,8 +833,11 @@ pub const IO = struct {
     /// Darwin's fsync() syscall does not flush past the disk cache. We must use F_FULLFSYNC
     /// instead.
     /// https://twitter.com/TigerBeetleDB/status/1422491736224436225
-    fn fs_sync(fd: fd_t) void {
-        _ = posix.fcntl(fd, posix.F.FULLFSYNC, 1) catch @panic("F_FULLFSYNC failed");
+    fn fs_sync(fd: fd_t) !void {
+        // TODO: This is of dubious safety - it's _not_ safe to fall back on posix.fsync unless it's
+        // known at startup that the disk (eg, an external disk on a Mac) doesn't support
+        // F_FULLFSYNC.
+        _ = posix.fcntl(fd, posix.F.FULLFSYNC, 1) catch return posix.fsync(fd);
     }
 
     /// Allocates a file contiguously using fallocate() if supported.
@@ -885,7 +891,7 @@ pub const IO = struct {
 
             // not reported but need same error union
             .OPNOTSUPP => return error.OperationNotSupported,
-            else => |errno| return posix.unexpectedErrno(errno),
+            else => |errno| return stdx.unexpected_errno("fs_allocate", errno),
         }
 
         // Now actually perform the allocation.

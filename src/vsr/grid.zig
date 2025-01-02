@@ -51,7 +51,7 @@ pub fn GridType(comptime Storage: type) type {
 
         // Grid just reuses the Storage's NextTick abstraction for simplicity.
         pub const NextTick = Storage.NextTick;
-        pub const Fsync = Storage.Fsync;
+        pub const Flush = Storage.Flush;
 
         pub const Write = struct {
             callback: *const fn (*Grid.Write) void,
@@ -741,6 +741,7 @@ pub fn GridType(comptime Storage: type) type {
                 write.block.*[0..vsr.sector_ceil(write_header.size)],
                 .grid,
                 block_offset(write.address),
+                .{},
             );
         }
 

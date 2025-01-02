@@ -123,6 +123,7 @@ pub const Storage = struct {
         /// Tick at which this write is considered "completed" and the callback should be called.
         done_at_tick: u64,
         stack_trace: StackTrace,
+        dsync: bool,
 
         fn less_than(context: void, a: *Write, b: *Write) math.Order {
             _ = context;
@@ -421,10 +422,17 @@ pub const Storage = struct {
         buffer: []const u8,
         zone: vsr.Zone,
         offset_in_zone: u64,
+        options: struct { dsync: bool = true },
     ) void {
         zone.verify_iop(buffer, offset_in_zone);
         maybe(zone == .grid_padding); // Padding is zeroed during format.
         hash_log.emit_autohash(.{ buffer, zone, offset_in_zone }, .DeepRecursive);
+
+        if (!options.dsync) {
+            // Non-dsync writes only make sense for the grid, and even then, only for blocks
+            // created by compaction (not state sync!).
+            assert(zone == .grid);
+        }
 
         // Verify that there are no concurrent overlapping writes.
         var iterator = storage.writes.iterator();
@@ -441,6 +449,7 @@ pub const Storage = struct {
             .offset = offset_in_zone,
             .done_at_tick = storage.ticks + storage.write_latency(),
             .stack_trace = StackTrace.capture(),
+            .dsync = options.dsync,
         };
 
         // We ensure the capacity is sufficient for constants.iops_write_max in init()

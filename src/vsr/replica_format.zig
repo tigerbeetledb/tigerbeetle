@@ -38,6 +38,10 @@ pub fn format(
 
     replica_format.formatting = true;
     while (replica_format.formatting) storage.tick();
+
+    storage.flush_sectors(ReplicaFormat.flush_sectors_callback, &replica_format.flush);
+    replica_format.formatting = true;
+    while (replica_format.formatting) storage.tick();
 }
 
 fn ReplicaFormatType(comptime Storage: type) type {
@@ -48,6 +52,7 @@ fn ReplicaFormatType(comptime Storage: type) type {
         formatting: bool = false,
         superblock_context: SuperBlock.Context = undefined,
         write: Storage.Write = undefined,
+        flush: Storage.Flush = undefined,
 
         fn format_wal(
             self: *ReplicaFormat,
@@ -99,6 +104,7 @@ fn ReplicaFormatType(comptime Storage: type) type {
                     wal_buffer[0..size],
                     .wal_prepares,
                     wal_offset,
+                    .{ .dsync = false, .format = true },
                 );
                 self.formatting = true;
                 while (self.formatting) storage.tick();
@@ -128,6 +134,7 @@ fn ReplicaFormatType(comptime Storage: type) type {
                     wal_buffer[0..size],
                     .wal_headers,
                     wal_offset,
+                    .{ .dsync = false, .format = true },
                 );
                 self.formatting = true;
                 while (self.formatting) storage.tick();
@@ -157,6 +164,7 @@ fn ReplicaFormatType(comptime Storage: type) type {
                     message_buffer,
                     .client_replies,
                     slot * constants.message_size_max,
+                    .{ .dsync = false, .format = true },
                 );
                 self.formatting = true;
                 while (self.formatting) storage.tick();
@@ -189,6 +197,7 @@ fn ReplicaFormatType(comptime Storage: type) type {
                     padding_buffer,
                     .grid_padding,
                     0,
+                    .{ .dsync = false, .format = true },
                 );
                 self.formatting = true;
                 while (self.formatting) storage.tick();
@@ -204,6 +213,12 @@ fn ReplicaFormatType(comptime Storage: type) type {
         fn format_superblock_callback(superblock_context: *SuperBlock.Context) void {
             const self: *ReplicaFormat =
                 @alignCast(@fieldParentPtr("superblock_context", superblock_context));
+            assert(self.formatting);
+            self.formatting = false;
+        }
+
+        fn flush_sectors_callback(flush: *Storage.Flush) void {
+            const self: *ReplicaFormat = @alignCast(@fieldParentPtr("flush", flush));
             assert(self.formatting);
             self.formatting = false;
         }
