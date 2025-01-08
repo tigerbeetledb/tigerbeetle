@@ -132,6 +132,10 @@ pub const Storage = struct {
         }
     };
 
+    pub const Flush = struct {
+        callback: *const fn (write: *Storage.Flush) void,
+    };
+
     pub const NextTick = struct {
         next: ?*NextTick = null,
         source: NextTickSource,
@@ -158,6 +162,7 @@ pub const Storage = struct {
 
     reads: PriorityQueue(*Storage.Read, void, Storage.Read.less_than),
     writes: PriorityQueue(*Storage.Write, void, Storage.Write.less_than),
+    unflushed: u64 = 0,
 
     ticks: u64 = 0,
     next_tick_queue: FIFOType(NextTick) = .{ .name = "storage_next_tick" },
@@ -422,16 +427,17 @@ pub const Storage = struct {
         buffer: []const u8,
         zone: vsr.Zone,
         offset_in_zone: u64,
-        options: struct { dsync: bool = true },
+        options: struct { dsync: bool = true, format: bool = false },
     ) void {
         zone.verify_iop(buffer, offset_in_zone);
         maybe(zone == .grid_padding); // Padding is zeroed during format.
         hash_log.emit_autohash(.{ buffer, zone, offset_in_zone }, .DeepRecursive);
 
         if (!options.dsync) {
-            // Non-dsync writes only make sense for the grid, and even then, only for blocks
-            // created by compaction (not state sync!).
-            assert(zone == .grid);
+            // Non-dsync writes normally only make sense for the grid, and even then, only for
+            // blocks created by compaction (not state sync!). That's relaxed when formatting,
+            // however.
+            assert(zone == .grid or options.format);
         }
 
         // Verify that there are no concurrent overlapping writes.
@@ -475,6 +481,10 @@ pub const Storage = struct {
 
         if (storage.x_in_100(storage.options.write_fault_probability)) {
             storage.fault_faulty_sectors(write.zone, write.offset, write.buffer.len);
+        }
+
+        if (!write.dsync) {
+            storage.unflushed += 1;
         }
 
         write.callback(write);
@@ -564,6 +574,16 @@ pub const Storage = struct {
                 },
             }
         }
+    }
+
+    pub fn flush_sectors(
+        storage: *Storage,
+        callback: *const fn (flush: *Storage.Flush) void,
+        flush: *Storage.Flush,
+    ) void {
+        storage.unflushed = 0;
+        flush.callback = callback;
+        flush.callback(flush);
     }
 
     pub fn area_memory(

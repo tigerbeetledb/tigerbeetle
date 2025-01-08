@@ -235,6 +235,7 @@ pub const IO = struct {
             buf: [*]const u8,
             len: u32,
             offset: u64,
+            dsync: bool,
         },
     };
 

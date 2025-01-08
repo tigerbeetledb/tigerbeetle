@@ -1591,7 +1591,6 @@ pub const IO = struct {
             log.info("allocating {}...", .{std.fmt.fmtIntSizeBin(size)});
             try fs_allocate(fd, size);
         }
-        log.info("Done", .{});
 
         // The best fsync strategy is always to fsync before reading because this prevents us from
         // making decisions on data that was never durably written by a previously crashed process.
@@ -1670,7 +1669,6 @@ pub const IO = struct {
             },
         }
 
-        log.info("Returning", .{});
         return fd;
     }
 
