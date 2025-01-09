@@ -485,6 +485,7 @@ const Environment = struct {
         grid_checkpoint,
         forest_checkpoint,
         superblock_checkpoint,
+        grid_checkpoint_durable,
     };
 
     random: std.rand.Random,
@@ -531,6 +532,7 @@ const Environment = struct {
                 .trace = &env.trace,
                 .missing_blocks_max = 0,
                 .missing_tables_max = 0,
+                .blocks_released_prior_checkpoint_durability_max = 0,
             }),
             .forest = undefined,
             .model = .{},
@@ -784,6 +786,9 @@ const Environment = struct {
         env.superblock.open(superblock_open_callback, &env.superblock_context);
         try env.tick_until_state_change(.superblock_open, .free_set_open);
 
+        // The fuzzer runs in a single process, all checkpoints are trivially durable.
+        env.grid.free_set.checkpoint_durable = true;
+
         env.grid.open(grid_open_callback);
         try env.tick_until_state_change(.free_set_open, .forest_init);
 
@@ -833,7 +838,12 @@ const Environment = struct {
                 },
                 .view_attributes = null,
                 .manifest_references = env.forest.manifest_log.checkpoint_references(),
-                .free_set_reference = env.grid.free_set_checkpoint.checkpoint_reference(),
+                .free_set_references = .{
+                    .blocks_acquired = env.grid
+                        .free_set_checkpoint_blocks_acquired.checkpoint_reference(),
+                    .blocks_released = env.grid
+                        .free_set_checkpoint_blocks_released.checkpoint_reference(),
+                },
                 .client_sessions_reference = .{
                     .last_block_checksum = 0,
                     .last_block_address = 0,
@@ -848,6 +858,8 @@ const Environment = struct {
                 .release = vsr.Release.minimum,
             });
             try env.tick_until_state_change(.superblock_checkpoint, .fuzzing);
+
+            env.grid.free_set.free_released_blocks();
 
             env.checkpoint_op = null;
         }

@@ -285,6 +285,10 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
             return Table.layout.block_value_count_max;
         }
 
+        pub fn data_block_count_max(_: *const Tree) u32 {
+            return Table.layout.data_block_count_max;
+        }
+
         fn cached_data_block_search(
             tree: *Tree,
             address: u64,

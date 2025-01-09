@@ -87,6 +87,7 @@ pub fn GridType(comptime Storage: type) type {
             /// The current checkpoint when the read began.
             /// Used to verify that the checkpoint does not advance while the read is in progress.
             checkpoint_id: u128,
+            checkpoint_durable: bool,
 
             /// When coherent=true:
             /// - the block (address+checksum) is part of the current checkpoint.
@@ -166,7 +167,9 @@ pub fn GridType(comptime Storage: type) type {
         superblock: *SuperBlock,
         trace: *vsr.trace.Tracer,
         free_set: FreeSet,
-        free_set_checkpoint: CheckpointTrailer,
+        free_set_checkpoint_blocks_acquired: CheckpointTrailer,
+        free_set_checkpoint_blocks_released: CheckpointTrailer,
+
         blocks_missing: GridBlocksMissing,
 
         cache: Cache,
@@ -197,6 +200,7 @@ pub fn GridType(comptime Storage: type) type {
             none,
             open: *const fn (*Grid) void,
             checkpoint: *const fn (*Grid) void,
+            checkpoint_durable: *const fn (*Grid) void,
             cancel: *const fn (*Grid) void,
         } = .none,
 
@@ -208,22 +212,29 @@ pub fn GridType(comptime Storage: type) type {
             cache_blocks_count: u64 = Cache.value_count_max_multiple,
             missing_blocks_max: usize,
             missing_tables_max: usize,
+            blocks_released_prior_checkpoint_durability_max: usize,
         }) !Grid {
-            const shard_count_limit: usize = @intCast(@divFloor(
-                options.superblock.storage_size_limit - vsr.superblock.data_file_size_min,
-                constants.block_size * FreeSet.shard_bits,
-            ));
-            const block_count_limit = shard_count_limit * FreeSet.shard_bits;
-
-            var free_set = try FreeSet.init(allocator, block_count_limit);
+            const blocks_count = Grid.block_count_max(options.superblock);
+            var free_set = try FreeSet.init(allocator, .{
+                .blocks_count = blocks_count,
+                .blocks_released_prior_checkpoint_durability_max = options
+                    .blocks_released_prior_checkpoint_durability_max,
+            });
             errdefer free_set.deinit(allocator);
 
-            var free_set_checkpoint = try CheckpointTrailer.init(
+            var free_set_checkpoint_blocks_acquired = try CheckpointTrailer.init(
                 allocator,
                 .free_set,
-                FreeSet.encode_size_max(block_count_limit),
+                FreeSet.encode_size_max(blocks_count),
             );
-            errdefer free_set_checkpoint.deinit(allocator);
+            errdefer free_set_checkpoint_blocks_acquired.deinit(allocator);
+
+            var free_set_checkpoint_blocks_released = try CheckpointTrailer.init(
+                allocator,
+                .free_set,
+                FreeSet.encode_size_max(blocks_count),
+            );
+            errdefer free_set_checkpoint_blocks_released.deinit(allocator);
 
             var blocks_missing = try GridBlocksMissing.init(allocator, .{
                 .blocks_max = options.missing_blocks_max,
@@ -255,7 +266,8 @@ pub fn GridType(comptime Storage: type) type {
                 .superblock = options.superblock,
                 .trace = options.trace,
                 .free_set = free_set,
-                .free_set_checkpoint = free_set_checkpoint,
+                .free_set_checkpoint_blocks_acquired = free_set_checkpoint_blocks_acquired,
+                .free_set_checkpoint_blocks_released = free_set_checkpoint_blocks_released,
                 .blocks_missing = blocks_missing,
                 .cache = cache,
                 .cache_blocks = cache_blocks,
@@ -272,7 +284,9 @@ pub fn GridType(comptime Storage: type) type {
             grid.cache.deinit(allocator);
             grid.blocks_missing.deinit(allocator);
 
-            grid.free_set_checkpoint.deinit(allocator);
+            grid.free_set_checkpoint_blocks_acquired.deinit(allocator);
+            grid.free_set_checkpoint_blocks_released.deinit(allocator);
+
             grid.free_set.deinit(allocator);
 
             grid.* = undefined;
@@ -282,32 +296,66 @@ pub fn GridType(comptime Storage: type) type {
             assert(grid.callback == .none);
 
             grid.callback = .{ .open = callback };
-            grid.free_set_checkpoint.open(
+            grid.free_set_checkpoint_blocks_acquired.open(
                 grid,
-                grid.superblock.working.free_set_reference(),
-                open_free_set_callback,
+                grid.superblock.working.free_set_reference(.blocks_acquired),
+                open_free_set_callback_blocks_acquired,
+            );
+            grid.free_set_checkpoint_blocks_released.open(
+                grid,
+                grid.superblock.working.free_set_reference(.blocks_released),
+                open_free_set_callback_blocks_released,
             );
         }
 
-        fn open_free_set_callback(free_set_checkpoint: *CheckpointTrailer) void {
-            const grid: *Grid = @fieldParentPtr("free_set_checkpoint", free_set_checkpoint);
+        fn open_free_set_callback_blocks_acquired(trailer: *CheckpointTrailer) void {
+            assert(trailer.callback == .none);
+            const grid: *Grid = @fieldParentPtr("free_set_checkpoint_blocks_acquired", trailer);
+            grid.open_free_set_callback();
+        }
+
+        fn open_free_set_callback_blocks_released(trailer: *CheckpointTrailer) void {
+            assert(trailer.callback == .none);
+            const grid: *Grid = @fieldParentPtr("free_set_checkpoint_blocks_released", trailer);
+            grid.open_free_set_callback();
+        }
+
+        fn open_free_set_callback(grid: *Grid) void {
             const callback = grid.callback.open;
+            // May still be reading the CheckpointTrailer for `blocks_acquired`.
+            if (grid.free_set_checkpoint_blocks_acquired.callback == .open) return;
+            assert(grid.free_set_checkpoint_blocks_acquired.callback == .none);
+
+            // May still be reading the CheckpointTrailer for `blocks_released`.
+            if (grid.free_set_checkpoint_blocks_released.callback == .open) return;
+            assert(grid.free_set_checkpoint_blocks_released.callback == .none);
 
             {
                 assert(!grid.free_set.opened);
                 defer assert(grid.free_set.opened);
 
-                const free_set_checkpoint_block_addresses =
-                    free_set_checkpoint.block_addresses[0..free_set_checkpoint.block_count()];
+                const block_count_encoded_blocks_acquired =
+                    grid.free_set_checkpoint_blocks_acquired.block_count();
+                const block_count_encoded_blocks_released =
+                    grid.free_set_checkpoint_blocks_released.block_count();
                 grid.free_set.open(.{
-                    .encoded = free_set_checkpoint.decode_chunks(),
-                    .block_addresses = free_set_checkpoint_block_addresses,
+                    .encoded = .{
+                        .blocks_acquired = grid.free_set_checkpoint_blocks_acquired.decode_chunks(),
+                        .blocks_released = grid.free_set_checkpoint_blocks_released.decode_chunks(),
+                    },
+                    .block_addresses = .{
+                        .blocks_acquired = grid.free_set_checkpoint_blocks_acquired
+                            .block_addresses[0..block_count_encoded_blocks_acquired],
+                        .blocks_released = grid.free_set_checkpoint_blocks_released
+                            .block_addresses[0..block_count_encoded_blocks_released],
+                    },
                 });
-                assert((grid.free_set.count_acquired() > 0) == (free_set_checkpoint.size > 0));
+                assert((grid.free_set.count_acquired() > 0) ==
+                    (grid.free_set_checkpoint_blocks_acquired.size > 0));
+                assert((grid.free_set.count_released() > 0) ==
+                    (grid.free_set_checkpoint_blocks_released.size > 0));
                 assert(grid.free_set.count_reservations() == 0);
-                assert(grid.free_set.count_released() == grid.free_set_checkpoint.block_count());
             }
-
             grid.callback = .none;
             callback(grid);
         }
@@ -317,16 +365,10 @@ pub fn GridType(comptime Storage: type) type {
         ///   2. Derive the number of blocks required to store the encoding.
         ///   3. Allocate free set blocks for the encoding (in the old checkpoint).
         ///   4. Write the free set blocks to disk.
-        ///   5. Awaits all pending repair-writes to blocks that were just freed. This guarantees
-        ///      that there are no outstanding writes to (now-)free blocks when we enter the new
-        ///      checkpoint. This step runs concurrently to step 4.
-        ///   6. Mark currently released blocks as free and eligible for acquisition in the next
-        ///      checkpoint.
-        ///   7. Mark the free set's own blocks as released (but not yet free).
+        ///   5. Mark the free set's own blocks as released (but not yet free).
         ///
-        /// This function handles step 1 and 5.
-        /// This function calls `free_set_checkpoint.checkpoint`, which handles steps 2-4.
-        /// The caller is responsible for calling FreeSet.checkpoint which handles 6 and 7.
+        /// This function handles step 1, and calls `CheckpointTrailer.checkpoint`, which handles
+        /// 2-5.
         pub fn checkpoint(grid: *Grid, callback: *const fn (*Grid) void) void {
             assert(grid.callback == .none);
             assert(grid.read_global_queue.empty());
@@ -334,32 +376,40 @@ pub fn GridType(comptime Storage: type) type {
             {
                 assert(grid.free_set.count_reservations() == 0);
 
-                grid.free_set.include_staging();
-                defer grid.free_set.exclude_staging();
+                const free_set_encoded = grid.free_set.encode_chunks(
+                    grid.free_set_checkpoint_blocks_acquired.encode_chunks(),
+                    grid.free_set_checkpoint_blocks_released.encode_chunks(),
+                );
 
-                var free_set_encoder = grid.free_set.encode_chunks();
-                defer assert(free_set_encoder.done());
+                grid.free_set_checkpoint_blocks_acquired.size =
+                    free_set_encoded.encoded_size_blocks_acquired;
+                grid.free_set_checkpoint_blocks_released.size =
+                    free_set_encoded.encoded_size_blocks_released;
 
-                const free_set_chunks = grid.free_set_checkpoint.encode_chunks();
-
-                grid.free_set_checkpoint.size = 0;
-                for (free_set_chunks) |chunk| {
-                    grid.free_set_checkpoint.size +=
-                        @as(u32, @intCast(free_set_encoder.encode_chunk(chunk)));
-
-                    if (free_set_encoder.done()) break;
-                } else unreachable;
-                assert(grid.free_set_checkpoint.size % @sizeOf(FreeSet.Word) == 0);
+                assert(grid.free_set_checkpoint_blocks_acquired.size % @sizeOf(FreeSet.Word) == 0);
+                assert(grid.free_set_checkpoint_blocks_released.size % @sizeOf(FreeSet.Word) == 0);
             }
 
             grid.callback = .{ .checkpoint = callback };
-            grid.blocks_missing.checkpoint_commence(&grid.free_set);
-            grid.free_set_checkpoint.checkpoint(checkpoint_free_set_callback);
+            grid.free_set_checkpoint_blocks_acquired
+                .checkpoint(checkpoint_free_set_blocks_acquired_callback);
+            grid.free_set_checkpoint_blocks_released
+                .checkpoint(checkpoint_free_set_blocks_released_callback);
         }
 
-        fn checkpoint_free_set_callback(set: *CheckpointTrailer) void {
-            const grid: *Grid = @fieldParentPtr("free_set_checkpoint", set);
+        fn checkpoint_free_set_blocks_acquired_callback(trailer: *CheckpointTrailer) void {
+            assert(trailer.callback == .none);
+            const grid: *Grid = @fieldParentPtr("free_set_checkpoint_blocks_acquired", trailer);
             assert(grid.callback == .checkpoint);
+
+            grid.checkpoint_join();
+        }
+
+        fn checkpoint_free_set_blocks_released_callback(trailer: *CheckpointTrailer) void {
+            assert(trailer.callback == .none);
+            const grid: *Grid = @fieldParentPtr("free_set_checkpoint_blocks_released", trailer);
+            assert(grid.callback == .checkpoint);
+
             grid.checkpoint_join();
         }
 
@@ -367,13 +417,43 @@ pub fn GridType(comptime Storage: type) type {
             assert(grid.callback == .checkpoint);
             assert(grid.read_global_queue.empty());
 
-            if (grid.free_set_checkpoint.callback == .checkpoint) {
-                return; // Still writing free set blocks.
+            if (grid.free_set_checkpoint_blocks_acquired.callback == .checkpoint) {
+                return; // Still writing free set `blocks_acquired` bitset.
             }
-            assert(grid.free_set_checkpoint.callback == .none);
+            assert(grid.free_set_checkpoint_blocks_acquired.callback == .none);
 
-            // We are still repairing some blocks that were released at the checkpoint.
-            if (!grid.blocks_missing.checkpoint_complete()) {
+            if (grid.free_set_checkpoint_blocks_released.callback == .checkpoint) {
+                return; // Still writing free set `blocks_released` bitset.
+            }
+            assert(grid.free_set_checkpoint_blocks_released.callback == .none);
+
+            const callback = grid.callback.checkpoint;
+            grid.callback = .none;
+            callback(grid);
+        }
+
+        ///   Now that the checkpoint is durable on a commit quorum of replicas:
+        ///   1. Await all pending repair-writes to blocks that were just freed. This guarantees
+        ///      that there are no outstanding writes to (now-)free blocks.
+        ///   2. Mark currently released blocks as free and eligible for acquisition.
+        ///
+        /// This function handles step 1.
+        /// The caller is responsible for calling FreeSet.checkpoint which handles 2.
+        pub fn checkpoint_durable(grid: *Grid, callback: *const fn (*Grid) void) void {
+            assert(!grid.free_set.checkpoint_durable);
+            grid.callback = .{ .checkpoint_durable = callback };
+
+            grid.blocks_missing.checkpoint_durable_commence(&grid.free_set);
+            if (grid.blocks_missing.checkpoint_durable.?.aborting == 0) {
+                grid.checkpoint_durable_join();
+            }
+        }
+
+        fn checkpoint_durable_join(grid: *Grid) void {
+            assert(grid.callback == .checkpoint_durable);
+
+            // We are still repairing some blocks released during the previous checkpoint interval.
+            if (!grid.blocks_missing.checkpoint_durable_complete()) {
                 assert(grid.write_iops.executing() > 0);
                 return;
             }
@@ -382,23 +462,23 @@ pub fn GridType(comptime Storage: type) type {
             while (write_queue) |write| : (write_queue = write.next) {
                 assert(write.repair);
                 assert(!grid.free_set.is_free(write.address));
-                assert(!grid.free_set.is_released(write.address));
+                assert(!grid.free_set.to_be_freed_at_checkpoint_durability(write.address));
             }
 
             var write_iops = grid.write_iops.iterate();
             while (write_iops.next()) |iop| {
                 assert(!grid.free_set.is_free(iop.write.address));
-                assert(!grid.free_set.is_released(iop.write.address));
+                assert(!grid.free_set.to_be_freed_at_checkpoint_durability(iop.write.address));
             }
 
-            // Now that there are no writes to released blocks, we can safely mark them as free.
-            // This concludes grid checkpointing.
-            grid.free_set.checkpoint(
-                grid.free_set_checkpoint.block_addresses[0..grid.free_set_checkpoint.block_count()],
-            );
-            assert(grid.free_set.count_released() == grid.free_set_checkpoint.block_count());
+            // Now that there are no writes to released blocks, we can safely mark them as free,
+            // and also mark the checkpoint as durable.
+            assert(!grid.free_set.checkpoint_durable);
+            defer assert(grid.free_set.checkpoint_durable);
+            grid.free_set.free_released_blocks();
+            grid.free_set.mark_checkpoint_durable();
 
-            const callback = grid.callback.checkpoint;
+            const callback = grid.callback.checkpoint_durable;
             grid.callback = .none;
             callback(grid);
         }
@@ -408,6 +488,7 @@ pub fn GridType(comptime Storage: type) type {
             switch (grid.callback) {
                 .none => {},
                 .open => {},
+                .checkpoint_durable => {},
                 .checkpoint => unreachable,
                 .cancel => unreachable,
             }
@@ -500,19 +581,22 @@ pub fn GridType(comptime Storage: type) type {
         /// This reduces conflict misses in the block cache, by freeing ways soon after they are
         /// released.
         ///
-        /// This does not remove the block from the cache — the block can be read until the next
+        /// This does not remove the blocks from the cache — the blocks can be read until the next
         /// checkpoint.
         ///
-        /// Asserts that the address is not currently being read from or written to.
-        pub fn release(grid: *Grid, address: u64) void {
+        /// Asserts that the addresses are not currently being read from or written to.
+        pub fn release(grid: *Grid, addresses: []const u64) void {
             assert(grid.callback == .none);
-            assert(grid.writing(address, null) != .create);
-            // It's safe to release an address that is being read from,
-            // because the superblock will not allow it to be overwritten before
-            // the end of the bar.
+            for (addresses) |address| {
+                assert(address > 0);
 
-            grid.cache.demote(address);
-            grid.free_set.release(address);
+                // It's safe to release an address that is being read from, because the superblock
+                // will not allow it to be overwritten before the end of the bar.
+                assert(grid.writing(address, null) != .create);
+
+                grid.cache.demote(address);
+                grid.free_set.release(address);
+            }
         }
 
         const Writing = enum { create, repair, not_writing };
@@ -640,7 +724,7 @@ pub fn GridType(comptime Storage: type) type {
         ) void {
             const block_header = schema.header_from_block(block.*);
             assert(grid.superblock.opened);
-            assert(grid.callback == .none or grid.callback == .checkpoint);
+            assert(grid.callback != .cancel);
             assert(grid.writing(block_header.address, block.*) == .not_writing);
             assert(grid.blocks_missing.repair_waiting(block_header.address, block_header.checksum));
             assert(!grid.free_set.is_free(block_header.address));
@@ -801,7 +885,9 @@ pub fn GridType(comptime Storage: type) type {
             // assertions forbidding concurrent writes using the same block/address
             // if the callback calls write_block().
             completed_write.callback(completed_write);
-            if (grid.callback == .checkpoint) grid.checkpoint_join();
+
+            // We start awaiting pending repairs when the checkpoint becomes durable.
+            if (grid.callback == .checkpoint_durable) grid.checkpoint_durable_join();
         }
 
         /// Fetch the block synchronously from cache, if possible.
@@ -885,6 +971,7 @@ pub fn GridType(comptime Storage: type) type {
                 .address = address,
                 .checksum = checksum,
                 .coherent = callback == .from_local_or_global_storage,
+                .checkpoint_durable = grid.free_set.checkpoint_durable,
                 .cache_read = options.cache_read,
                 .cache_write = options.cache_write,
                 .checkpoint_id = grid.superblock.working.checkpoint_id(),
@@ -1218,6 +1305,14 @@ pub fn GridType(comptime Storage: type) type {
             }
         }
 
+        pub fn block_count_max(superblock: *const SuperBlock) usize {
+            const shard_count_limit: usize = @intCast(@divFloor(
+                superblock.storage_size_limit - vsr.superblock.data_file_size_min,
+                constants.block_size * FreeSet.shard_bits,
+            ));
+            return shard_count_limit * FreeSet.shard_bits;
+        }
+
         fn block_offset(address: u64) u64 {
             assert(address > 0);
 
@@ -1231,8 +1326,33 @@ pub fn GridType(comptime Storage: type) type {
             if (Storage != TestStorage) return;
 
             if (grid.superblock.storage.options.grid_checker) |checker| {
-                checker.assert_coherent(grid.superblock.working.checkpoint_id(), address, checksum);
-                checker.assert_coherent(grid.superblock.staging.checkpoint_id(), address, checksum);
+                checker.assert_coherent(
+                    grid.superblock.working.checkpoint_id(),
+                    grid.free_set.checkpoint_durable,
+                    address,
+                    checksum,
+                );
+
+                checker.assert_coherent(
+                    grid.superblock.staging.checkpoint_id(),
+                    checkpoint_durable: {
+                        if (grid.superblock.working.checkpoint_id() ==
+                            grid.superblock.staging.checkpoint_id())
+                        {
+                            break :checkpoint_durable grid.free_set.checkpoint_durable;
+                        } else {
+                            // Checkpoint is currently being written to the superblock. Pass
+                            // checkpoint_durable=False as we update free_set.checkpoint_durable
+                            // only *after* the checkpoint is written to the superblock.
+                            assert(grid.superblock.staging.parent_checkpoint_id() ==
+                                grid.superblock.working.checkpoint_id());
+                            assert(grid.free_set.checkpoint_durable);
+                            break :checkpoint_durable false;
+                        }
+                    },
+                    address,
+                    checksum,
+                );
             }
         }
 

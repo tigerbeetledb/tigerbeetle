@@ -1473,9 +1473,19 @@ test "Cluster: scrub: background scrubber, fully corrupt grid" {
         if (a0_free_set.is_free(address)) {
             assert(b2_free_set.is_free(address));
             assert(b2_storage.area_faulty(.{ .grid = .{ .address = address } }));
-        } else {
-            assert(!b2_free_set.is_free(address));
+        } else if (!a0_free_set.is_released(address)) {
+            // Acquired (but not released) blocks are guaranteed to be repaired by the scrubber.
+            assert(!b2_free_set.is_free(address) and !b2_free_set.is_released(address));
             assert(!b2_storage.area_faulty(.{ .grid = .{ .address = address } }));
+        } else {
+            // Acquired (but released) blocks are not guaranteed to be repaired by the scrubber.
+            // Includes the following blocks that will be freed when checkpoint_2 becomes durable:
+            // * Blocks released by ManifestLog compaction,
+            // * Blocks released ClientSessions and FreeSet checkpoint trailers (these *could* be
+            //   released at the checkpoint itself, since new checkpoint trailers are allocated
+            //   at checkpoint, but we release them at checkpoint durability alongside other
+            //   released blocks).
+            maybe(b2_storage.area_faulty(.{ .grid = .{ .address = address } }));
         }
     }
 
@@ -2416,7 +2426,7 @@ const TestReplicas = struct {
             // updated its sync_op_max.
             maybe(replica.superblock.staging.vsr_state.sync_op_max > 0);
 
-            try t.cluster.storage_checker.replica_sync(&replica.superblock);
+            try t.cluster.storage_checker.replica_sync(Cluster.Replica, replica);
         }
     }
 

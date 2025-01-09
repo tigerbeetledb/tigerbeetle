@@ -94,8 +94,7 @@ fn run_fuzz(
                 }
                 active_reservations.clearRetainingCapacity();
 
-                const free_set_blocks = .{};
-                free_set.checkpoint(&free_set_blocks);
+                free_set.free_released_blocks();
                 free_set_model.checkpoint();
             },
         }

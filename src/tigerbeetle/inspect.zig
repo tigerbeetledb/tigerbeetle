@@ -558,77 +558,157 @@ const Inspector = struct {
         try print_reply_body(output, reply);
     }
 
-    fn inspect_grid(inspector: *Inspector, output: std.io.AnyWriter, superblock_copy: ?u8) !void {
-        const superblock = try inspector.read_superblock(superblock_copy);
-
+    fn decode_free_set_from_superblock(
+        inspector: *Inspector,
+        output: std.io.AnyWriter,
+        superblock: *const SuperBlockHeader,
+        bitset: vsr.FreeSet.BitsetKinds,
+        free_set_buffer: []align(@alignOf(vsr.FreeSet.Word)) u8,
+        free_set_addresses: *std.ArrayList(u64),
+    ) !void {
         const block = try allocate_block(inspector.allocator);
         defer inspector.allocator.free(block);
 
-        const free_set_size = superblock.vsr_state.checkpoint.free_set_size;
-        const free_set_buffer =
-            try inspector.allocator.alignedAlloc(u8, @alignOf(vsr.FreeSet.Word), free_set_size);
-        defer inspector.allocator.free(free_set_buffer);
+        const free_set_reference = superblock.free_set_reference(bitset);
+        const free_set_size = free_set_reference.trailer_size;
+        const free_set_checksum = free_set_reference.checksum;
 
         const free_set_block_count = stdx.div_ceil(
-            superblock.vsr_state.checkpoint.free_set_size,
+            free_set_size,
             constants.block_size - @sizeOf(vsr.Header),
         );
 
-        var free_set_references = try std.ArrayList(vsr.BlockReference).initCapacity(
+        var free_set_block_references = try std.ArrayList(vsr.BlockReference).initCapacity(
             inspector.allocator,
             free_set_block_count,
         );
-        defer free_set_references.deinit();
+        defer free_set_block_references.deinit();
 
-        var free_set_addresses =
-            try std.ArrayList(u64).initCapacity(inspector.allocator, free_set_block_count);
-        defer free_set_addresses.deinit();
-
-        if (superblock.vsr_state.checkpoint.free_set_size == 0) {
-            assert(superblock.vsr_state.checkpoint.free_set_last_block_address == 0);
-            assert(superblock.vsr_state.checkpoint.free_set_last_block_checksum == 0);
-        } else {
-            var free_set_block: ?vsr.BlockReference = .{
-                .address = superblock.vsr_state.checkpoint.free_set_last_block_address,
-                .checksum = superblock.vsr_state.checkpoint.free_set_last_block_checksum,
+        if (free_set_size > 0) {
+            // Read free set from the grid by manually following the linked list of blocks.
+            // Note that free set is written in direct order, and must be read backwards.
+            var free_set_block_reference: ?vsr.BlockReference = .{
+                .address = free_set_reference.last_block_address,
+                .checksum = free_set_reference.last_block_checksum,
             };
 
             var free_set_cursor: usize = free_set_size;
-            while (free_set_block) |free_set_reference| {
+            while (free_set_block_reference) |block_reference| {
                 try inspector.read_block(
                     block,
-                    free_set_reference.address,
-                    free_set_reference.checksum,
+                    block_reference.address,
+                    block_reference.checksum,
                 );
+
+                assert(schema.header_from_block(block).checksum == block_reference.checksum);
 
                 const encoded_words = schema.TrailerNode.body(block);
                 free_set_cursor -= encoded_words.len;
-                stdx.copy_disjoint(.inexact, u8, free_set_buffer[free_set_cursor..], encoded_words);
-
-                free_set_references.appendAssumeCapacity(free_set_reference);
-                free_set_addresses.appendAssumeCapacity(free_set_reference.address);
-                free_set_block = schema.TrailerNode.previous(block);
+                stdx.copy_disjoint(
+                    .inexact,
+                    u8,
+                    free_set_buffer[free_set_cursor..],
+                    encoded_words,
+                );
+                free_set_block_references.appendAssumeCapacity(block_reference);
+                free_set_addresses.appendAssumeCapacity(block_reference.address);
+                free_set_block_reference = schema.TrailerNode.previous(block);
             }
+            assert(free_set_block_reference == null);
             assert(free_set_cursor == 0);
+        } else {
+            assert(free_set_reference.last_block_address == 0);
+            assert(free_set_reference.last_block_checksum == 0);
         }
-        assert(free_set_references.items.len == free_set_block_count);
+
+        assert(free_set_block_references.items.len == free_set_block_count);
         assert(free_set_addresses.items.len == free_set_block_count);
+        assert(vsr.checksum(free_set_buffer[0..free_set_size]) == free_set_checksum);
+
+        for (free_set_block_references.items, 0..) |reference, i| {
+            try output.print(
+                "free_set_trailer.blocks[{}]: address={} checksum={x:0>32}\n",
+                .{ i, reference.address, reference.checksum },
+            );
+        }
+    }
+    fn inspect_grid(inspector: *Inspector, output: std.io.AnyWriter, superblock_copy: ?u8) !void {
+        const superblock = try inspector.read_superblock(superblock_copy);
+
+        const free_set_blocks_acquired_buffer =
+            try inspector.allocator.alignedAlloc(
+            u8,
+            @alignOf(vsr.FreeSet.Word),
+            superblock.vsr_state.checkpoint.free_set_blocks_acquired_size,
+        );
+        defer inspector.allocator.free(free_set_blocks_acquired_buffer);
+
+        var free_set_blocks_acquired_addresses =
+            try std.ArrayList(u64).initCapacity(inspector.allocator, stdx.div_ceil(
+            superblock.vsr_state.checkpoint.free_set_blocks_acquired_size,
+            constants.block_size - @sizeOf(vsr.Header),
+        ));
+        defer free_set_blocks_acquired_addresses.deinit();
+
+        const free_set_blocks_released_buffer =
+            try inspector.allocator.alignedAlloc(
+            u8,
+            @alignOf(vsr.FreeSet.Word),
+            superblock.vsr_state.checkpoint.free_set_blocks_released_size,
+        );
+        defer inspector.allocator.free(free_set_blocks_released_buffer);
+
+        var free_set_blocks_released_addresses =
+            try std.ArrayList(u64).initCapacity(inspector.allocator, stdx.div_ceil(
+            superblock.vsr_state.checkpoint.free_set_blocks_released_size,
+            constants.block_size - @sizeOf(vsr.Header),
+        ));
+        defer free_set_blocks_released_addresses.deinit();
+
+        try inspector.decode_free_set_from_superblock(
+            output,
+            superblock,
+            .blocks_acquired,
+            free_set_blocks_acquired_buffer,
+            &free_set_blocks_acquired_addresses,
+        );
+        try inspector.decode_free_set_from_superblock(
+            output,
+            superblock,
+            .blocks_released,
+            free_set_blocks_released_buffer,
+            &free_set_blocks_released_addresses,
+        );
 
         // This is not exact, but is an overestimate:
         const grid_blocks_max =
             @divFloor(constants.storage_size_limit_max, constants.block_size);
-        var free_set = try vsr.FreeSet.init(inspector.allocator, grid_blocks_max);
+        const free_set_block_addresses_count = free_set_blocks_acquired_addresses.items.len +
+            free_set_blocks_released_addresses.items.len;
+        var free_set = try vsr.FreeSet.init(
+            inspector.allocator,
+            .{
+                .blocks_count = grid_blocks_max,
+                .blocks_released_prior_checkpoint_durability_max = free_set_block_addresses_count,
+            },
+        );
         defer free_set.deinit(inspector.allocator);
 
         free_set.open(.{
-            .encoded = if (free_set_buffer.len == 0) &.{} else &.{free_set_buffer},
-            .block_addresses = free_set_addresses.items,
+            .encoded = .{
+                .blocks_acquired = &.{free_set_blocks_acquired_buffer},
+                .blocks_released = &.{free_set_blocks_released_buffer},
+            },
+            .block_addresses = .{
+                .blocks_acquired = free_set_blocks_acquired_addresses.items,
+                .blocks_released = free_set_blocks_released_addresses.items,
+            },
         });
 
         const free_set_address_max = free_set.highest_address_acquired() orelse 0;
         const free_set_compression_ratio =
             @as(f64, @floatFromInt(stdx.div_ceil(free_set_address_max, 8))) /
-            @as(f64, @floatFromInt(superblock.vsr_state.checkpoint.free_set_size));
+            @as(f64, @floatFromInt(superblock.vsr_state.checkpoint.free_set_blocks_acquired_size));
 
         try output.print(
             \\free_set.blocks_free={}
@@ -644,17 +724,11 @@ const Inspector = struct {
                 free_set.count_acquired(),
                 free_set.count_released(),
                 free_set.highest_address_acquired(),
-                std.fmt.fmtIntSizeBin(superblock.vsr_state.checkpoint.free_set_size),
+                std.fmt.fmtIntSizeBin(superblock.vsr_state.checkpoint
+                    .free_set_blocks_acquired_size),
                 free_set_compression_ratio,
             },
         );
-
-        for (free_set_references.items, 0..) |reference, i| {
-            try output.print(
-                "free_set_trailer.blocks[{}]: address={} checksum={x:0>32}\n",
-                .{ i, reference.address, reference.checksum },
-            );
-        }
     }
 
     fn inspect_grid_block(inspector: *Inspector, output: std.io.AnyWriter, address: u64) !void {

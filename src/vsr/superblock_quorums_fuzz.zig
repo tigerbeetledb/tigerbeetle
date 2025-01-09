@@ -140,7 +140,8 @@ fn test_quorums_working(
                         checkpoint_header.set_checksum();
                         break :header checkpoint_header;
                     },
-                    .free_set_checksum = vsr.checksum(&.{}),
+                    .free_set_blocks_acquired_checksum = vsr.checksum(&.{}),
+                    .free_set_blocks_released_checksum = vsr.checksum(&.{}),
                     .client_sessions_checksum = vsr.checksum(&.{}),
                     .storage_size = superblock.data_file_size_min,
                 }),
@@ -162,7 +163,7 @@ fn test_quorums_working(
                 }
             },
             // Ensure we have a different checksum.
-            .invalid_fork => header.vsr_state.checkpoint.free_set_size += 1,
+            .invalid_fork => header.vsr_state.checkpoint.free_set_blocks_acquired_size += 1,
             .invalid_parent => header.parent += 1,
             .invalid_misdirect => {
                 if (misdirect) {

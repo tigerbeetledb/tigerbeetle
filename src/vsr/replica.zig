@@ -10,6 +10,7 @@ const stdx = @import("../stdx.zig");
 const StaticAllocator = @import("../static_allocator.zig");
 const allocate_block = @import("grid.zig").allocate_block;
 const GridType = @import("grid.zig").GridType;
+const FreeSet = @import("./free_set.zig").FreeSet;
 const BlockPtr = @import("grid.zig").BlockPtr;
 const IOPSType = @import("../iops.zig").IOPSType;
 const MessagePool = @import("../message_pool.zig").MessagePool;
@@ -21,6 +22,7 @@ const TestStorage = @import("../testing/storage.zig").Storage;
 const marks = @import("../testing/marks.zig");
 
 const vsr = @import("../vsr.zig");
+const compaction_input_tables_max = @import("../lsm/compaction.zig").compaction_tables_input_max;
 const Header = vsr.Header;
 const Timeout = vsr.Timeout;
 const Command = vsr.Command;
@@ -102,7 +104,8 @@ pub fn ReplicaType(
     comptime AOF: type,
 ) type {
     const Grid = GridType(Storage);
-    const GridScrubber = vsr.GridScrubberType(StateMachine.Forest);
+    const Forest = StateMachine.Forest;
+    const GridScrubber = vsr.GridScrubberType(Forest);
 
     return struct {
         const Replica = @This();
@@ -112,7 +115,7 @@ pub fn ReplicaType(
         const Journal = vsr.JournalType(Replica, Storage);
         const ClientReplies = vsr.ClientRepliesType(Storage);
         const Clock = vsr.ClockType(Time);
-        const ForestTableIterator = ForestTableIteratorType(StateMachine.Forest);
+        const ForestTableIterator = ForestTableIteratorType(Forest);
 
         const ReplicateOptions = struct {
             closed_loop: bool = false,
@@ -842,11 +845,14 @@ pub fn ReplicaType(
             assert(self.syncing == .idle);
             assert(self.sync_tables == null);
             assert(self.grid_repair_tables.executing() == 0);
-            assert(self.grid.free_set.count_released() ==
-                self.grid.free_set_checkpoint.block_count());
+
             assert(std.meta.eql(
-                grid.free_set_checkpoint.checkpoint_reference(),
-                self.superblock.working.free_set_reference(),
+                grid.free_set_checkpoint_blocks_acquired.checkpoint_reference(),
+                self.superblock.working.free_set_reference(.blocks_acquired),
+            ));
+            assert(std.meta.eql(
+                grid.free_set_checkpoint_blocks_released.checkpoint_reference(),
+                self.superblock.working.free_set_reference(.blocks_released),
             ));
 
             // TODO This can probably be performed concurrently to StateMachine.open().
@@ -872,16 +878,8 @@ pub fn ReplicaType(
                 self.superblock.working.client_sessions_reference(),
             ));
 
-            {
-                const checkpoint = &self.client_sessions_checkpoint;
-                var address_previous: u64 = 0;
-                for (checkpoint.block_addresses[0..checkpoint.block_count()]) |address| {
-                    assert(address > 0);
-                    assert(address > address_previous);
-                    address_previous = address;
-                    self.grid.release(address);
-                }
-            }
+            const checkpoint = &self.client_sessions_checkpoint;
+            self.grid.release(checkpoint.block_addresses[0..checkpoint.block_count()]);
 
             const trailer_size = self.client_sessions_checkpoint.size;
             const trailer_chunks = self.client_sessions_checkpoint.decode_chunks();
@@ -1097,6 +1095,8 @@ pub fn ReplicaType(
                 .cache_blocks_count = options.grid_cache_blocks_count,
                 .missing_blocks_max = constants.grid_missing_blocks_max,
                 .missing_tables_max = constants.grid_missing_tables_max,
+                .blocks_released_prior_checkpoint_durability_max = self
+                    .blocks_released_prior_checkpoint_durability_max(),
             });
             errdefer self.grid.deinit(allocator);
 
@@ -4272,11 +4272,41 @@ pub fn ReplicaType(
 
         fn commit_compact(self: *Replica) enum { pending } {
             assert(self.commit_stage == .compact);
+            if (!self.grid.free_set.checkpoint_durable and vsr.Checkpoint.durable(
+                self.op_checkpoint(),
+                self.commit_min,
+            )) {
+                // Checkpoint is guaranteed to be durable on a commit quorum when a replica is
+                // committing the (pipeline + 1)ᵗʰ prepare after checkpoint trigger. It might
+                // already be durable before this point (some part of the cluster may be lagging
+                // while a commit quorum may already be on the next checkpoint), but it is crucial
+                // for storage determinism that each replica marks it as durable at the same time.
+                if (vsr.Checkpoint.trigger_for_checkpoint(self.op_checkpoint())) |trigger| {
+                    assert(self.commit_min == trigger + constants.pipeline_prepare_queue_max + 1);
+                }
+
+                self.grid_scrubber.checkpoint_durable();
+                self.grid.checkpoint_durable(commit_checkpoint_durable_grid_callback);
+            } else {
+                self.state_machine.compact(
+                    commit_compact_callback,
+                    self.commit_prepare.?.header.op,
+                );
+            }
+
+            return .pending;
+        }
+
+        fn commit_checkpoint_durable_grid_callback(grid: *Grid) void {
+            const self: *Replica = @alignCast(@fieldParentPtr("grid", grid));
+            assert(self.commit_stage == .compact);
+            assert(self.grid.free_set.checkpoint_durable);
+            assert(vsr.Checkpoint.durable(self.op_checkpoint(), self.commit_min));
+
             self.state_machine.compact(
                 commit_compact_callback,
                 self.commit_prepare.?.header.op,
             );
-            return .pending;
         }
 
         fn commit_compact_callback(state_machine: *StateMachine) void {
@@ -4303,11 +4333,14 @@ pub fn ReplicaType(
             assert(op <= self.op);
             assert((op + 1) % constants.lsm_compaction_ops == 0);
             log.info("{}: commit_checkpoint_data: checkpoint_data start " ++
-                "(op={} current_checkpoint={} next_checkpoint={})", .{
+                "(op={} current_checkpoint={} next_checkpoint={} free_set.acquired={} " ++
+                "free_set.released={}", .{
                 self.replica,
                 self.op,
                 self.op_checkpoint(),
                 self.op_checkpoint_next(),
+                self.grid.free_set.count_acquired(),
+                self.grid.free_set.count_released(),
             });
 
             if (self.event_callback) |hook| hook(self, .checkpoint_commenced);
@@ -4334,18 +4367,13 @@ pub fn ReplicaType(
             } else {
                 self.commit_checkpoint_data_callback_join(.aof);
             }
-            self.grid_scrubber.checkpoint();
             self.state_machine.checkpoint(commit_checkpoint_data_state_machine_callback);
             self.client_sessions_checkpoint
                 .checkpoint(commit_checkpoint_data_client_sessions_callback);
             self.client_replies.checkpoint(commit_checkpoint_data_client_replies_callback);
+
             // The grid checkpoint must begin after the manifest/trailers have acquired all
             // their blocks, since it encodes the free set:
-            log.info("{}: commit_checkpoint_data: free_set.acquired={} free_set.released={}", .{
-                self.replica,
-                self.grid.free_set.count_acquired(),
-                self.grid.free_set.count_released(),
-            });
             self.grid.checkpoint(commit_checkpoint_data_grid_callback);
             return .pending;
         }
@@ -4383,8 +4411,7 @@ pub fn ReplicaType(
             assert(self.commit_prepare.?.header.op <= self.op);
             assert(self.commit_prepare.?.header.op == self.commit_min);
             assert(self.grid.free_set.opened);
-            assert(self.grid.free_set.count_released() ==
-                self.grid.free_set_checkpoint.block_count());
+
             self.commit_checkpoint_data_callback_join(.grid);
         }
 
@@ -4406,20 +4433,6 @@ pub fn ReplicaType(
                     self.op_checkpoint_next(),
                 });
                 self.grid.assert_only_repairing();
-
-                {
-                    const checkpoint = &self.client_sessions_checkpoint;
-                    var address_previous: u64 = 0;
-                    for (checkpoint.block_addresses[0..checkpoint.block_count()]) |address| {
-                        assert(address > 0);
-                        assert(address > address_previous);
-                        address_previous = address;
-                        self.grid.release(address);
-                    }
-                }
-                assert(self.grid.free_set.count_released() ==
-                    self.grid.free_set_checkpoint.block_count() +
-                    self.client_sessions_checkpoint.block_count());
 
                 return self.commit_dispatch_resume();
             }
@@ -4469,10 +4482,14 @@ pub fn ReplicaType(
                 var storage_size = vsr.superblock.data_file_size_min;
                 if (self.grid.free_set.highest_address_acquired()) |address| {
                     assert(address > 0);
-                    assert(self.grid.free_set_checkpoint.size > 0);
+                    assert(self.grid.free_set_checkpoint_blocks_acquired.size > 0);
+                    assert(self.grid.free_set_checkpoint_blocks_released.size > 0);
+
                     storage_size += address * constants.block_size;
                 } else {
-                    assert(self.grid.free_set_checkpoint.size == 0);
+                    assert(self.grid.free_set_checkpoint_blocks_acquired.size == 0);
+                    assert(self.grid.free_set_checkpoint_blocks_released.size == 0);
+
                     assert(self.grid.free_set.count_released() == 0);
                 }
                 break :storage_size storage_size;
@@ -4534,8 +4551,12 @@ pub fn ReplicaType(
                     .sync_op_max = sync_op_max,
                     .manifest_references = self.state_machine.forest
                         .manifest_log.checkpoint_references(),
-                    .free_set_reference = self.grid
-                        .free_set_checkpoint.checkpoint_reference(),
+                    .free_set_references = .{
+                        .blocks_acquired = self.grid
+                            .free_set_checkpoint_blocks_acquired.checkpoint_reference(),
+                        .blocks_released = self.grid
+                            .free_set_checkpoint_blocks_released.checkpoint_reference(),
+                    },
                     .client_sessions_reference = self
                         .client_sessions_checkpoint.checkpoint_reference(),
                     .storage_size = storage_size,
@@ -4556,13 +4577,33 @@ pub fn ReplicaType(
             assert(self.op_checkpoint() == self.commit_min - constants.lsm_compaction_ops);
             assert(self.op_checkpoint() == self.superblock.staging.vsr_state.checkpoint.header.op);
             assert(self.op_checkpoint() == self.superblock.working.vsr_state.checkpoint.header.op);
-            self.grid.assert_only_repairing();
 
             log.info(
                 "{}: commit_checkpoint_superblock_callback: " ++
                     "checkpoint_superblock done (op={} new_checkpoint={})",
                 .{ self.replica, self.op, self.op_checkpoint() },
             );
+
+            self.grid.assert_only_repairing();
+
+            // Mark the current checkpoint as not durable, then release the blocks acquired for the
+            // ClientSessions and FreeSet checkpoints (to be freed when the *next* checkpoint
+            // becomes durable). The ordering is important here, if we were to release these blocks
+            // before the checkpoint is marked as not durable, they would erroneously be freed when
+            // the *current* checkpoint becomes durable.
+            self.grid.free_set.mark_checkpoint_not_durable();
+
+            self.grid.release(self.client_sessions_checkpoint
+                .block_addresses[0..self.client_sessions_checkpoint.block_count()]);
+            self.grid.release(self.grid.free_set_checkpoint_blocks_acquired
+                .block_addresses[0..self.grid.free_set_checkpoint_blocks_acquired.block_count()]);
+            self.grid.release(self.grid.free_set_checkpoint_blocks_released
+                .block_addresses[0..self.grid.free_set_checkpoint_blocks_released.block_count()]);
+
+            assert(self.grid.free_set.count_released() >=
+                self.grid.free_set_checkpoint_blocks_acquired.block_count() +
+                self.grid.free_set_checkpoint_blocks_released.block_count() +
+                self.client_sessions_checkpoint.block_count());
 
             // Send prepare_oks that may have been wittheld by virtue of `op_prepare_ok_max`.
             self.send_prepare_oks_after_checkpoint();
@@ -9354,7 +9395,9 @@ pub fn ReplicaType(
             self.state_machine.reset();
 
             self.grid.free_set.reset();
-            self.grid.free_set_checkpoint.reset();
+            self.grid.free_set_checkpoint_blocks_acquired.reset();
+            self.grid.free_set_checkpoint_blocks_released.reset();
+
             self.client_sessions_checkpoint.reset();
             self.client_sessions.reset();
             // Faulty bits will be set in sync_content().
@@ -9556,7 +9599,7 @@ pub fn ReplicaType(
 
                     if (self.grid_repair_tables.available() == 0) break;
                 } else {
-                    if (StateMachine.Forest.Storage == TestStorage) {
+                    if (Forest.Storage == TestStorage) {
                         self.superblock.storage.verify_table(
                             table_info.address,
                             table_info.checksum,
@@ -10127,13 +10170,9 @@ pub fn ReplicaType(
         /// 1. Index blocks across all tables in the forest
         /// 2. Value blocks across all tables in the forest
         /// 3. ManifestLog blocks
-        /// 4. CheckpointTrailer blocks (client sessions & free set)
         pub fn assert_free_set_consistent(self: *const Replica) void {
             assert(self.grid.free_set.opened);
             assert(self.state_machine.forest.manifest_log.opened);
-            assert(self.grid.free_set.count_released() ==
-                self.grid.free_set_checkpoint.block_count() +
-                self.client_sessions_checkpoint.block_count());
 
             // Must be invoked either on startup, or after checkpoint completes.
             assert(!self.state_machine_opened or self.commit_stage == .checkpoint_superblock);
@@ -10142,7 +10181,7 @@ pub fn ReplicaType(
             var tables_index_block_count: u64 = 0;
             var tables_value_block_count: u64 = 0;
             while (forest_tables_iterator.next(&self.state_machine.forest)) |table| {
-                const block_value_count = switch (StateMachine.Forest.tree_id_cast(table.tree_id)) {
+                const block_value_count = switch (Forest.tree_id_cast(table.tree_id)) {
                     inline else => |tree_id| self.state_machine.forest.tree_for_id_const(
                         tree_id,
                     ).block_value_count_max(),
@@ -10153,11 +10192,60 @@ pub fn ReplicaType(
                     block_value_count,
                 );
             }
-            assert(self.grid.free_set.count_acquired() ==
+
+            assert((self.grid.free_set.count_acquired() - self.grid.free_set.count_released()) ==
                 (tables_index_block_count + tables_value_block_count +
-                self.client_sessions_checkpoint.block_count() +
-                self.grid.free_set_checkpoint.block_count() +
                 self.state_machine.forest.manifest_log.log_block_checksums.count));
+        }
+
+        /// Calculates the maximum number of blocks that could be released before a checkpoint
+        /// becomes durable on a commit quorum of replicas.
+        ///
+        /// A checkpoint is guaranteed to be durable when a replica commits the (pipeline + 1)th
+        /// prepare after checkpoint trigger (see `op_repair_min` for more details). Therefore,
+        /// the maximum number of blocks released prior checkpoint durability is equivalent
+        /// to the maximum number of blocks released by the first pipeline of prepares after
+        /// checkpoint trigger. This includes blocks released by:
+        /// 1. Forest compaction
+        /// 2. ManifestLog compaction
+        /// 3. ClientSessions checkpoint
+        /// 4. FreeSet checkpoint
+        fn blocks_released_prior_checkpoint_durability_max(self: *const Replica) usize {
+            const half_bar_ops = @divExact(constants.lsm_compaction_ops, 2);
+            const pipeline_half_bars =
+                stdx.div_ceil(constants.pipeline_prepare_queue_max, half_bar_ops);
+
+            // Maximum number of blocks released within a pipeline by LSM forest compactions.
+            var compaction_input_blocks_forest_max: u32 = 0;
+            inline for (Forest.tree_infos) |tree_info| {
+                const tree_id = comptime Forest.tree_id_cast(tree_info.tree_id);
+                const tree = self.state_machine.forest.tree_for_id_const(tree_id);
+                compaction_input_blocks_forest_max +=
+                    compaction_input_tables_max * (1 + tree.data_block_count_max());
+            }
+            const compaction_blocks_released_half_bar_max =
+                stdx.div_ceil(constants.lsm_levels, 2) *
+                compaction_input_blocks_forest_max;
+
+            const compaction_blocks_released_pipeline_max =
+                (pipeline_half_bars * compaction_blocks_released_half_bar_max) +
+                // Compaction is paced across all beats, so if a pipeline is less than half a bar,
+                // for simplicity, use the upper bound for a half a bar (treating pacing as
+                // imperfect).
+                @intFromBool(pipeline_half_bars == 0) * compaction_blocks_released_half_bar_max;
+
+            // Maximum number of blocks released within a pipeline by ManifestLog compactions.
+            const manifest_log_blocks_released_pipeline_max =
+                pipeline_half_bars * Forest.manifest_log_blocks_released_half_bar_max;
+
+            const block_count_max_grid = Grid.block_count_max(&self.superblock);
+
+            return compaction_blocks_released_pipeline_max +
+                manifest_log_blocks_released_pipeline_max +
+                CheckpointTrailer.block_count_max(ClientSessions.encode_size) +
+                // We checkpoint both `blocks_acquired` and `blocks_released` bitsets in FreeSet.
+                CheckpointTrailer.block_count_max(FreeSet.encode_size_max(block_count_max_grid)) +
+                CheckpointTrailer.block_count_max(FreeSet.encode_size_max(block_count_max_grid));
         }
     };
 }

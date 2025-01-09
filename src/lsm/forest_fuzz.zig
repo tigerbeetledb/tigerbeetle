@@ -136,6 +136,7 @@ const Environment = struct {
             .trace = &env.trace,
             .missing_blocks_max = 0,
             .missing_tables_max = 0,
+            .blocks_released_prior_checkpoint_durability_max = 0,
         });
 
         env.scan_lookup_buffer = try allocator.alloc(
@@ -196,6 +197,11 @@ const Environment = struct {
         env.superblock.open(superblock_open_callback, &env.superblock_context);
         try env.tick_until_state_change(.superblock_open, .free_set_open);
 
+        // The fuzzer runs in a single process, all checkpoints are trivially durable.
+        // We do this *before* we open the grid and the free set, otherwise we'd have to pass a
+        // value for `blocks_released_prior_checkpoint_durability_max` that accounts for
+        // the checkpointed free set blocks (they are marked released during FreeSet.open).
+        env.grid.free_set.checkpoint_durable = true;
         env.grid.open(grid_open_callback);
         try env.tick_until_state_change(.free_set_open, .forest_init);
 
@@ -290,7 +296,12 @@ const Environment = struct {
             },
             .view_attributes = null,
             .manifest_references = env.forest.manifest_log.checkpoint_references(),
-            .free_set_reference = env.grid.free_set_checkpoint.checkpoint_reference(),
+            .free_set_references = .{
+                .blocks_acquired = env.grid
+                    .free_set_checkpoint_blocks_acquired.checkpoint_reference(),
+                .blocks_released = env.grid
+                    .free_set_checkpoint_blocks_released.checkpoint_reference(),
+            },
             .client_sessions_reference = .{
                 .last_block_checksum = 0,
                 .last_block_address = 0,
@@ -306,6 +317,7 @@ const Environment = struct {
         });
         try env.tick_until_state_change(.superblock_checkpoint, .fuzzing);
 
+        env.grid.free_set.free_released_blocks();
         env.checkpoint_op = null;
     }
 

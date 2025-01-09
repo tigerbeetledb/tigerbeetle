@@ -12,6 +12,8 @@ const schema = @import("schema.zig");
 const GridType = @import("../vsr/grid.zig").GridType;
 const NodePool = @import("node_pool.zig").NodePoolType(constants.lsm_manifest_node_size, 16);
 const ManifestLogType = @import("manifest_log.zig").ManifestLogType;
+const ManifestLogPace = @import("manifest_log.zig").Pace;
+
 const ScanBufferPool = @import("scan_buffer.zig").ScanBufferPool;
 const ResourcePoolType = @import("compaction.zig").ResourcePoolType;
 const snapshot_min_for_table_output = @import("compaction.zig").snapshot_min_for_table_output;
@@ -200,6 +202,16 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
             .max = tree_infos[tree_infos.len - 1].tree_id,
         };
 
+        const manifest_log_compaction_pace = ManifestLogPace.init(.{
+            .tree_count = tree_infos.len,
+            // TODO Make this a runtime argument (from the CLI, derived from storage-size-max if
+            // possible).
+            .tables_max = table_count_max,
+            .compact_extra_blocks = constants.lsm_manifest_compact_extra_blocks,
+        });
+        pub const manifest_log_blocks_released_half_bar_max =
+            manifest_log_compaction_pace.half_bar_compact_blocks_max;
+
         pub const Options = struct {
             node_count: u32,
             /// The amount of blocks allocated for compactions. Compactions will be deterministic
@@ -260,13 +272,11 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
             try forest.node_pool.init(allocator, options.node_count);
             errdefer forest.node_pool.deinit(allocator);
 
-            try forest.manifest_log.init(allocator, grid, .{
-                .tree_id_min = tree_id_range.min,
-                .tree_id_max = tree_id_range.max,
-                // TODO Make this a runtime argument (from the CLI, derived from storage-size-max if
-                // possible).
-                .forest_table_count_max = table_count_max,
-            });
+            try forest.manifest_log.init(
+                allocator,
+                grid,
+                &manifest_log_compaction_pace,
+            );
             errdefer forest.manifest_log.deinit(allocator);
 
             var grooves_initialized: usize = 0;

@@ -109,9 +109,9 @@ pub fn CheckpointTrailerType(comptime Storage: type) type {
             trailer_type: TrailerType,
             buffer_size: usize,
         ) !CheckpointTrailer {
-            const block_count_max = stdx.div_ceil(buffer_size, chunk_size_max);
+            const block_count_max_ = stdx.div_ceil(buffer_size, chunk_size_max);
 
-            const blocks = try allocator.alloc(BlockPtr, block_count_max);
+            const blocks = try allocator.alloc(BlockPtr, block_count_max_);
             errdefer allocator.free(blocks);
 
             for (blocks, 0..) |*block, i| {
@@ -120,14 +120,14 @@ pub fn CheckpointTrailerType(comptime Storage: type) type {
             }
             errdefer for (blocks) |block| allocator.free(block);
 
-            const block_bodies = try allocator.alloc([]align(@sizeOf(u256)) u8, block_count_max);
+            const block_bodies = try allocator.alloc([]align(@sizeOf(u256)) u8, block_count_max_);
             errdefer allocator.free(block_bodies);
             @memset(block_bodies, undefined);
 
-            const block_addresses = try allocator.alloc(u64, block_count_max);
+            const block_addresses = try allocator.alloc(u64, block_count_max_);
             errdefer allocator.free(block_addresses);
 
-            const block_checksums = try allocator.alloc(u128, block_count_max);
+            const block_checksums = try allocator.alloc(u128, block_count_max_);
             errdefer allocator.free(block_checksums);
 
             return .{
@@ -164,6 +164,10 @@ pub fn CheckpointTrailerType(comptime Storage: type) type {
 
         pub fn block_count(trailer: *const CheckpointTrailer) u32 {
             return @intCast(stdx.div_ceil(trailer.size, chunk_size_max));
+        }
+
+        pub fn block_count_max(trailer_size_max: u64) u32 {
+            return @intCast(stdx.div_ceil(trailer_size_max, chunk_size_max));
         }
 
         /// Each returned chunk has `chunk.len == chunk_size_max`.
