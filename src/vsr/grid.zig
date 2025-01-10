@@ -719,7 +719,7 @@ pub fn GridType(comptime Storage: type) type {
         fn write_block_with(grid: *Grid, iop: *WriteIOP, write: *Write) void {
             assert(!grid.free_set.is_free(write.address));
 
-            grid.trace.start(.{ .grid_write = .{ .iop = grid.write_iops.index(iop) } }, .{});
+            grid.trace.start(.{ .grid_write = .{ .iop = grid.write_iops.index(iop) } });
 
             iop.* = .{
                 .grid = grid,
@@ -772,7 +772,7 @@ pub fn GridType(comptime Storage: type) type {
             assert(cache_block_header.address == completed_write.address);
             grid.assert_coherent(completed_write.address, cache_block_header.checksum);
 
-            grid.trace.stop(.{ .grid_write = .{ .iop = grid.write_iops.index(iop) } }, .{});
+            grid.trace.stop(.{ .grid_write = .{ .iop = grid.write_iops.index(iop) } });
 
             if (grid.callback == .cancel) {
                 assert(grid.write_queue.empty());
@@ -969,7 +969,7 @@ pub fn GridType(comptime Storage: type) type {
             // block.
             assert(!grid.read_resolving);
 
-            grid.trace.start(.{ .grid_read = .{ .iop = grid.read_iops.index(iop) } }, .{});
+            grid.trace.start(.{ .grid_read = .{ .iop = grid.read_iops.index(iop) } });
 
             iop.* = .{
                 .completion = undefined,
@@ -992,7 +992,7 @@ pub fn GridType(comptime Storage: type) type {
             const grid = read.grid;
             const iop_block = &grid.read_iop_blocks[grid.read_iops.index(iop)];
 
-            grid.trace.stop(.{ .grid_read = .{ .iop = grid.read_iops.index(iop) } }, .{});
+            grid.trace.stop(.{ .grid_read = .{ .iop = grid.read_iops.index(iop) } });
 
             if (grid.callback == .cancel) {
                 grid.read_iops.release(iop);

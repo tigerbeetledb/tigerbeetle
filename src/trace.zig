@@ -103,25 +103,31 @@ const constants = @import("constants.zig");
 
 const trace_span_size_max = 1024;
 
+// FIXME hack for now
+const CommitStage = @import("vsr/replica.zig").CommitStage;
+const TreeEnum = @import("state_machine.zig").TreeEnum;
+
 pub const Event = union(enum) {
-    replica_commit,
-    replica_aof_write,
+    replica_commit: struct { stage: CommitStage, op: ?usize = null },
+    replica_aof_write: struct { op: usize },
     replica_sync_table: struct { index: usize },
 
-    compact_beat,
-    compact_beat_merge,
+    compact_beat: struct { tree: TreeEnum, level_b: u8 },
+    compact_beat_merge: struct { tree: TreeEnum, level_b: u8 },
     compact_manifest,
-    compact_mutable,
-    compact_mutable_suffix,
+    compact_mutable: struct { tree: TreeEnum },
+    compact_mutable_suffix: struct { tree: TreeEnum },
 
-    lookup,
-    lookup_worker: struct { index: u8 },
+    lookup: struct { tree: TreeEnum },
+    lookup_worker: struct { index: u8, tree: TreeEnum },
 
-    scan_tree: struct { index: u8 },
-    scan_tree_level: struct { index: u8, level: u8 },
+    scan_tree: struct { index: u8, tree: TreeEnum },
+    scan_tree_level: struct { index: u8, tree: TreeEnum, level: u8 },
 
     grid_read: struct { iop: usize },
     grid_write: struct { iop: usize },
+
+    const EventTag = std.meta.Tag(Event);
 
     pub fn format(
         event: *const Event,
@@ -142,9 +148,77 @@ pub const Event = union(enum) {
         }
     }
 
-    const EventTag = std.meta.Tag(Event);
+    fn data_concurrency(event: *const Event) EventConcurrency {
+        return switch (event.*) {
+            .replica_commit => .replica_commit,
+            .replica_aof_write => .replica_aof_write,
+            .replica_sync_table => |event_unwrapped| .{ .replica_sync_table = .{ .index = event_unwrapped.index } },
+            .compact_beat => .compact_beat,
+            .compact_beat_merge => .compact_beat_merge,
+            .compact_manifest => .compact_manifest,
+            .compact_mutable => .compact_mutable,
+            .compact_mutable_suffix => .compact_mutable_suffix,
+            .lookup => .lookup,
+            .lookup_worker => |event_unwrapped| .{ .lookup_worker = .{ .index = event_unwrapped.index } },
+            .scan_tree => |event_unwrapped| .{ .scan_tree = .{ .index = event_unwrapped.index } },
+            .scan_tree_level => |event_unwrapped| .{ .scan_tree_level = .{ .index = event_unwrapped.index, .level = event_unwrapped.level } },
+            .grid_read => |event_unwrapped| .{ .grid_read = .{ .iop = event_unwrapped.iop } },
+            .grid_write => |event_unwrapped| .{ .grid_write = .{ .iop = event_unwrapped.iop } },
+        };
+    }
 
-    const event_stack_cardinality = std.enums.EnumArray(EventTag, u32).init(.{
+    fn data_cardinality(event: *const Event) EventCardinality {
+        return switch (event.*) {
+            .replica_commit => |event_unwrapped| .{ .replica_commit = .{ .stage = event_unwrapped.stage } },
+            .replica_aof_write => .replica_aof_write,
+            .replica_sync_table => .replica_sync_table,
+            .compact_beat => |event_unwrapped| .{ .compact_beat = .{ .tree = event_unwrapped.tree, .level_b = event_unwrapped.level_b } },
+            .compact_beat_merge => |event_unwrapped| .{ .compact_beat_merge = .{ .tree = event_unwrapped.tree, .level_b = event_unwrapped.level_b } },
+            .compact_manifest => .compact_manifest,
+            .compact_mutable => |event_unwrapped| .{ .compact_mutable = .{ .tree = event_unwrapped.tree } },
+            .compact_mutable_suffix => |event_unwrapped| .{ .compact_mutable_suffix = .{ .tree = event_unwrapped.tree } },
+            .lookup => |event_unwrapped| .{ .lookup = .{ .tree = event_unwrapped.tree } },
+            .lookup_worker => |event_unwrapped| .{ .lookup_worker = .{ .tree = event_unwrapped.tree } },
+            .scan_tree => |event_unwrapped| .{ .scan_tree = .{ .tree = event_unwrapped.tree } },
+            .scan_tree_level => |event_unwrapped| .{ .scan_tree_level = .{ .tree = event_unwrapped.tree, .level = event_unwrapped.level } },
+            .grid_read => .grid_read,
+            .grid_write => .grid_write,
+        };
+    }
+};
+
+/// There's a difference between tracing and aggregate timing. When doing tracing, the code needs
+/// to worry about the static allocation required for _concurrent_ traces. That is, there might be
+/// multiple `scan_tree`s, with different `index`es happening at once.
+///
+/// When timing, this is flipped on its head: the timing code doesn't need space for concurrency
+/// because it is called once, when an event has finished, and internally aggregates.
+///
+/// Rather, it needs space for the cardinality of the tags you'd like to emit. In the case of
+/// `scan_tree`s, this would be the tree it's scanning over, rather than the index of the scan. Eg:
+///
+/// timing.scan_tree.transfers_id_avg=1234us vs timing.scan_tree.index_0_avg=1234us
+pub const EventConcurrency = union(Event.EventTag) {
+    replica_commit,
+    replica_aof_write,
+    replica_sync_table: struct { index: usize },
+
+    compact_beat,
+    compact_beat_merge,
+    compact_manifest,
+    compact_mutable,
+    compact_mutable_suffix,
+
+    lookup,
+    lookup_worker: struct { index: u8 },
+
+    scan_tree: struct { index: u8 },
+    scan_tree_level: struct { index: u8, level: u8 },
+
+    grid_read: struct { iop: usize },
+    grid_write: struct { iop: usize },
+
+    const stack_limits = std.enums.EnumArray(Event.EventTag, u32).init(.{
         .replica_commit = 1,
         .replica_aof_write = 1,
         .replica_sync_table = constants.grid_missing_tables_max,
@@ -161,39 +235,39 @@ pub const Event = union(enum) {
         .grid_write = constants.grid_iops_write_max,
     });
 
-    const stack_count = count: {
-        var count: u32 = 0;
-        for (std.enums.values(EventTag)) |event_type| {
-            count += event_stack_cardinality.get(event_type);
-        }
-        break :count count;
-    };
-
-    const event_stack_base = array: {
-        var array = std.enums.EnumArray(EventTag, u32).initDefault(0, .{});
+    const stack_bases = array: {
+        var array = std.enums.EnumArray(Event.EventTag, u32).initDefault(0, .{});
         var next: u32 = 0;
-        for (std.enums.values(EventTag)) |event_type| {
+        for (std.enums.values(Event.EventTag)) |event_type| {
             array.set(event_type, next);
-            next += event_stack_cardinality.get(event_type);
+            next += stack_limits.get(event_type);
         }
         break :array array;
     };
 
+    const stack_count = count: {
+        var count: u32 = 0;
+        for (std.enums.values(Event.EventTag)) |event_type| {
+            count += stack_limits.get(event_type);
+        }
+        break :count count;
+    };
+
     // Stack is a u32 since it must be losslessly encoded as a JSON integer.
-    fn stack(event: *const Event) u32 {
+    fn stack(event: *const EventConcurrency) u32 {
         switch (event.*) {
             inline .replica_sync_table,
             .lookup_worker,
             => |data| {
-                assert(data.index < event_stack_cardinality.get(event.*));
-                const stack_base = event_stack_base.get(event.*);
+                assert(data.index < stack_limits.get(event.*));
+                const stack_base = stack_bases.get(event.*);
                 return stack_base + @as(u32, @intCast(data.index));
             },
             .scan_tree => |data| {
                 assert(data.index < constants.lsm_scans_max);
                 // This event has "nested" sub-events, so its offset is calculated
                 // with padding to accommodate `scan_tree_level` events in between.
-                const stack_base = event_stack_base.get(event.*);
+                const stack_base = stack_bases.get(event.*);
                 const scan_tree_offset = (constants.lsm_levels + 1) * data.index;
                 return stack_base + scan_tree_offset;
             },
@@ -202,20 +276,79 @@ pub const Event = union(enum) {
                 assert(data.level < constants.lsm_levels);
                 // This is a "nested" event, so its offset is calculated
                 // relative to the parent `scan_tree`'s offset.
-                const stack_base = event_stack_base.get(.scan_tree);
+                const stack_base = stack_bases.get(.scan_tree);
                 const scan_tree_offset = (constants.lsm_levels + 1) * data.index;
                 const scan_tree_level_offset = data.level + 1;
                 return stack_base + scan_tree_offset + scan_tree_level_offset;
             },
             inline .grid_read, .grid_write => |data| {
-                assert(data.iop < event_stack_cardinality.get(event.*));
-                const stack_base = event_stack_base.get(event.*);
+                assert(data.iop < stack_limits.get(event.*));
+                const stack_base = stack_bases.get(event.*);
                 return stack_base + @as(u32, @intCast(data.iop));
             },
             inline else => |data, event_tag| {
                 comptime assert(@TypeOf(data) == void);
-                comptime assert(event_stack_cardinality.get(event_tag) == 1);
-                return comptime event_stack_base.get(event_tag);
+                comptime assert(stack_limits.get(event_tag) == 1);
+                return comptime stack_bases.get(event_tag);
+            },
+        }
+    }
+
+    pub fn format(
+        event: *const EventConcurrency,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        try writer.writeAll(@tagName(event.*));
+        switch (event.*) {
+            inline else => |data| {
+                if (@TypeOf(data) != void) {
+                    try writer.print(":{}", .{struct_format(data, .dense)});
+                }
+            },
+        }
+    }
+};
+
+pub const EventCardinality = union(Event.EventTag) {
+    replica_commit: struct { stage: CommitStage },
+    replica_aof_write,
+    replica_sync_table,
+
+    compact_beat: struct { tree: TreeEnum, level_b: u8 },
+    compact_beat_merge: struct { tree: TreeEnum, level_b: u8 },
+    compact_manifest,
+    compact_mutable: struct { tree: TreeEnum },
+    compact_mutable_suffix: struct { tree: TreeEnum },
+
+    lookup: struct { tree: TreeEnum },
+    lookup_worker: struct { tree: TreeEnum },
+
+    scan_tree: struct { tree: TreeEnum },
+    scan_tree_level: struct { tree: TreeEnum, level: u8 },
+
+    grid_read,
+    grid_write,
+
+    pub fn format(
+        event: *const EventCardinality,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+
+        try writer.writeAll(@tagName(event.*));
+        switch (event.*) {
+            inline else => |data| {
+                if (@TypeOf(data) != void) {
+                    try writer.print(":{}", .{struct_format(data, .dense)});
+                }
             },
         }
     }
@@ -226,7 +359,7 @@ pub const Tracer = struct {
     options: Options,
     buffer: []u8,
 
-    events_started: [Event.stack_count]?u64 = .{null} ** Event.stack_count,
+    events_started: [EventConcurrency.stack_count]?u64 = .{null} ** EventConcurrency.stack_count,
     time_start: std.time.Instant,
     timer: std.time.Timer,
 
@@ -257,16 +390,17 @@ pub const Tracer = struct {
         tracer.* = undefined;
     }
 
-    pub fn start(tracer: *Tracer, event: Event, data: anytype) void {
-        comptime assert(@typeInfo(@TypeOf(data)) == .Struct);
+    pub fn start(tracer: *Tracer, event: Event) void {
+        const data_concurrency = event.data_concurrency();
+        const data_cardinality = event.data_cardinality();
+        const stack = data_concurrency.stack();
 
-        const stack = event.stack();
         assert(tracer.events_started[stack] == null);
         tracer.events_started[stack] = tracer.timer.read();
 
-        log.debug(
+        log.info(
             "{}: {}: start:{}",
-            .{ tracer.replica_index, event, struct_format(data, .dense) },
+            .{ tracer.replica_index, data_concurrency, data_cardinality },
         );
 
         const writer = tracer.options.writer orelse return;
@@ -288,16 +422,13 @@ pub const Tracer = struct {
             "\"args\":{[args]s}" ++
             "}},\n", .{
             .process_id = tracer.replica_index,
-            .thread_id = event.stack(),
+            .thread_id = data_concurrency.stack(),
             .category = @tagName(event),
             .event = 'B',
             .timestamp = time_elapsed_us,
-            .name = event,
-            .data = struct_format(data, .sparse),
-            .args = if (comptime @TypeOf(data) == @TypeOf(.{}))
-                "{}" // Serialize `.{}` as an empty object, not as an empty array.
-            else
-                std.json.Formatter(@TypeOf(data)){ .value = data, .options = .{} },
+            .name = data_concurrency,
+            .data = struct_format(data_cardinality, .sparse),
+            .args = std.json.Formatter(@TypeOf(data_cardinality)){ .value = data_cardinality, .options = .{} },
         }) catch unreachable;
 
         writer.writeAll(buffer_stream.getWritten()) catch |err| {
@@ -305,10 +436,11 @@ pub const Tracer = struct {
         };
     }
 
-    pub fn stop(tracer: *Tracer, event: Event, data: anytype) void {
-        comptime assert(@typeInfo(@TypeOf(data)) == .Struct);
+    pub fn stop(tracer: *Tracer, event: Event) void {
+        const data_concurrency = event.data_concurrency();
+        const data_cardinality = event.data_cardinality();
+        const stack = data_concurrency.stack();
 
-        const stack = event.stack();
         const event_start_ns = tracer.events_started[stack].?;
         const event_end_ns = tracer.timer.read();
 
@@ -317,30 +449,28 @@ pub const Tracer = struct {
 
         log.debug("{}: {}: stop:{} (duration={}ms)", .{
             tracer.replica_index,
-            event,
-            struct_format(data, .dense),
+            data_concurrency,
+            struct_format(data_cardinality, .dense),
             @divFloor(event_end_ns - event_start_ns, std.time.ns_per_ms),
         });
 
-        tracer.write_stop(stack, data);
+        tracer.write_stop(stack);
     }
 
     pub fn reset(tracer: *Tracer, event_tag: Event.EventTag) void {
-        const stack_base = Event.event_stack_base.get(event_tag);
-        const cardinality = Event.event_stack_cardinality.get(event_tag);
+        const stack_base = EventConcurrency.stack_bases.get(event_tag);
+        const cardinality = EventConcurrency.stack_limits.get(event_tag);
         for (stack_base..stack_base + cardinality) |stack| {
             if (tracer.events_started[stack]) |_| {
                 log.debug("{}: {s}: reset", .{ tracer.replica_index, @tagName(event_tag) });
 
                 tracer.events_started[stack] = null;
-                tracer.write_stop(@intCast(stack), .{});
+                tracer.write_stop(@intCast(stack));
             }
         }
     }
 
-    fn write_stop(tracer: *Tracer, stack: u32, data: anytype) void {
-        comptime assert(@typeInfo(@TypeOf(data)) == .Struct);
-
+    fn write_stop(tracer: *Tracer, stack: u32) void {
         const writer = tracer.options.writer orelse return;
         const time_now = std.time.Instant.now() catch unreachable;
         const time_elapsed_ns = time_now.since(tracer.time_start);
@@ -372,7 +502,7 @@ pub const Tracer = struct {
 const DataFormatterCardinality = enum { dense, sparse };
 
 fn StructFormatterType(comptime Data: type, comptime cardinality: DataFormatterCardinality) type {
-    assert(@typeInfo(Data) == .Struct);
+    // assert(@typeInfo(Data) == .Struct);
 
     return struct {
         data: Data,

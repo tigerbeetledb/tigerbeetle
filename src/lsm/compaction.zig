@@ -978,10 +978,10 @@ pub fn CompactionType(
                 pool.blocks_free() >= compaction_block_count_beat_min -
                     @intFromBool(compaction.table_builder_index_block != null),
             );
-            compaction.grid.trace.start(.compact_beat, .{
-                .tree = compaction.tree.config.name,
+            compaction.grid.trace.start(.{ .compact_beat = .{
+                .tree = @enumFromInt(compaction.tree.config.id),
                 .level_b = compaction.level_b,
-            });
+            } });
             compaction.level_a_index_block_next = compaction.level_a_position.index_block;
             compaction.level_a_value_block_next = compaction.level_a_position.value_block;
             compaction.level_b_index_block_next = compaction.level_b_position.index_block;
@@ -1358,10 +1358,10 @@ pub fn CompactionType(
                 compaction.counters.wasted -= compaction.level_a_position.value;
             }
             compaction.counters.wasted -= compaction.level_b_position.value;
-            compaction.grid.trace.stop(.compact_beat, .{
-                .tree = compaction.tree.config.name,
+            compaction.grid.trace.stop(.{ .compact_beat = .{
+                .tree = @enumFromInt(compaction.tree.config.id),
                 .level_b = compaction.level_b,
-            });
+            } });
             compaction.beat_complete();
         }
 
@@ -1550,10 +1550,10 @@ pub fn CompactionType(
             compaction.pool.?.cpus.release(cpu);
             assert(compaction.table_builder.state == .index_and_data_block);
 
-            compaction.grid.trace.start(.compact_beat_merge, .{
-                .tree = compaction.tree.config.name,
+            compaction.grid.trace.start(.{ .compact_beat_merge = .{
+                .tree = @enumFromInt(compaction.tree.config.id),
                 .level_b = compaction.level_b,
-            });
+            } });
 
             const values_in_a, const values_in_b = compaction.merge_inputs();
             assert(values_in_a != null or values_in_b != null);
@@ -1626,10 +1626,10 @@ pub fn CompactionType(
 
             // NB: although all the work here is synchronous, we don't defer trace.stop precisely
             // to exclude compaction.dispatch call below.
-            compaction.grid.trace.stop(.compact_beat_merge, .{
-                .tree = compaction.tree.config.name,
+            compaction.grid.trace.stop(.{ .compact_beat_merge = .{
+                .tree = @enumFromInt(compaction.tree.config.id),
                 .level_b = compaction.level_b,
-            });
+            } });
             compaction.compaction_dispatch();
         }
 

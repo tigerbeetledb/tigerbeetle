@@ -956,10 +956,9 @@ pub fn GrooveType(
             fn start_workers(context: *PrefetchContext) void {
                 assert(context.workers_pending == 0);
 
-                context.groove.grid.trace.start(
-                    .lookup,
-                    .{ .tree = context.groove.objects.config.name },
-                );
+                context.groove.grid.trace.start(.{
+                    .lookup = .{ .tree = @enumFromInt(context.groove.objects.config.id) },
+                });
 
                 // Track an extra "worker" that will finish after the loop.
                 // This allows the callback to be called asynchronously on `next_tick`
@@ -975,8 +974,7 @@ pub fn GrooveType(
                     };
 
                     context.groove.grid.trace.start(
-                        .{ .lookup_worker = .{ .index = worker.index } },
-                        .{ .tree = context.groove.objects.config.name },
+                        .{ .lookup_worker = .{ .index = worker.index, .tree = @enumFromInt(context.groove.objects.config.id) } },
                     );
 
                     context.workers_pending += 1;
@@ -1017,10 +1015,9 @@ pub fn GrooveType(
                 context.groove.prefetch_keys.clearRetainingCapacity();
                 assert(context.groove.prefetch_keys.count() == 0);
 
-                context.groove.grid.trace.stop(
-                    .lookup,
-                    .{ .tree = context.groove.objects.config.name },
-                );
+                context.groove.grid.trace.stop(.{
+                    .lookup = .{ .tree = @enumFromInt(context.groove.objects.config.id) },
+                });
 
                 context.callback(context);
             }
@@ -1065,8 +1062,10 @@ pub fn GrooveType(
                 assert(worker.current == null);
                 const prefetch_entry = worker.context.key_iterator.next() orelse {
                     worker.context.groove.grid.trace.stop(
-                        .{ .lookup_worker = .{ .index = worker.index } },
-                        .{ .tree = worker.context.groove.objects.config.name },
+                        .{ .lookup_worker = .{
+                            .index = worker.index,
+                            .tree = @enumFromInt(worker.context.groove.objects.config.id),
+                        } },
                     );
 
                     worker.context.worker_finished();

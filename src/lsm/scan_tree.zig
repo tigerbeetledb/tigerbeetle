@@ -228,8 +228,7 @@ pub fn ScanTreeType(
             assert(self.state == .idle or self.state == .needs_data);
 
             self.tree.grid.trace.start(
-                .{ .scan_tree = .{ .index = self.buffer.index } },
-                .{ .tree = self.tree.config.name },
+                .{ .scan_tree = .{ .index = self.buffer.index, .tree = @enumFromInt(self.tree.config.id) } },
             );
 
             const state_before = self.state;
@@ -402,8 +401,7 @@ pub fn ScanTreeType(
             }
 
             self.tree.grid.trace.stop(
-                .{ .scan_tree = .{ .index = self.buffer.index } },
-                .{ .tree = self.tree.config.name },
+                .{ .scan_tree = .{ .index = self.buffer.index, .tree = @enumFromInt(self.tree.config.id) } },
             );
 
             callback(context, self);
@@ -616,8 +614,8 @@ fn ScanTreeLevelType(comptime ScanTree: type, comptime Storage: type) type {
                 .{ .scan_tree_level = .{
                     .index = self.scan.buffer.index,
                     .level = self.level_index,
+                    .tree = @enumFromInt(self.scan.tree.config.id),
                 } },
-                .{ .tree = self.scan.tree.config.name },
             );
 
             switch (self.state) {
@@ -942,8 +940,8 @@ fn ScanTreeLevelType(comptime ScanTree: type, comptime Storage: type) type {
                     .{ .scan_tree_level = .{
                         .index = self.scan.buffer.index,
                         .level = self.level_index,
+                        .tree = @enumFromInt(self.scan.tree.config.id),
                     } },
-                    .{ .tree = self.scan.tree.config.name },
                 );
 
                 self.fetch();
@@ -1007,8 +1005,8 @@ fn ScanTreeLevelType(comptime ScanTree: type, comptime Storage: type) type {
                 .{ .scan_tree_level = .{
                     .index = self.scan.buffer.index,
                     .level = self.level_index,
+                    .tree = @enumFromInt(self.scan.tree.config.id),
                 } },
-                .{ .tree = self.scan.tree.config.name },
             );
 
             switch (self.values) {
@@ -1033,8 +1031,8 @@ fn ScanTreeLevelType(comptime ScanTree: type, comptime Storage: type) type {
                 .{ .scan_tree_level = .{
                     .index = self.scan.buffer.index,
                     .level = self.level_index,
+                    .tree = @enumFromInt(self.scan.tree.config.id),
                 } },
-                .{ .tree = self.scan.tree.config.name },
             );
 
             self.scan.levels_read_complete();
