@@ -59,7 +59,7 @@ pub const Metrics = struct {
         if (self.events_timing[timing_stack] == null) {
             self.events_timing[timing_stack] = .{
                 .event = event_timing,
-                .timing = .{
+                .values = .{
                     .duration_min_us = duration_us,
                     .duration_max_us = duration_us,
                     .duration_sum_us = duration_us,
@@ -67,12 +67,12 @@ pub const Metrics = struct {
                 },
             };
         } else {
-            const timing_existing = self.events_timing[timing_stack].?.timing;
+            const timing_existing = self.events_timing[timing_stack].?.values;
             // Certain high cardinality data (eg, op) _can_ differ.
             // Maybe assert and gate on constants.verify
             //maybe(self.events_timing[timing_stack].?.event_timing == event_timing);
 
-            self.events_timing[timing_stack].?.timing = .{
+            self.events_timing[timing_stack].?.values = .{
                 .duration_min_us = @min(timing_existing.duration_min_us, duration_us),
                 .duration_max_us = @max(timing_existing.duration_max_us, duration_us),
                 .duration_sum_us = timing_existing.duration_sum_us + duration_us,

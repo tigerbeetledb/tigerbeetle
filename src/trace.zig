@@ -187,7 +187,7 @@ pub const Tracer = struct {
             "\"ph\":\"{[event]c}\"," ++
             "\"ts\":{[timestamp]}," ++
             "\"cat\":\"{[category]s}\"," ++
-            "\"name\":\"{[name]s}{[data]}\"," ++
+            "\"name\":\"{[category]s} {[event_tracing]s} {[event_timing]}\"," ++
             "\"args\":{[args]s}" ++
             "}},\n", .{
             .process_id = tracer.replica_index,
@@ -195,9 +195,9 @@ pub const Tracer = struct {
             .category = @tagName(event),
             .event = 'B',
             .timestamp = time_elapsed_us,
-            .name = event_tracing,
-            .data = event_timing,
-            .args = std.json.Formatter(@TypeOf(event_timing)){ .value = event_timing, .options = .{} },
+            .event_tracing = event_tracing,
+            .event_timing = event_timing,
+            .args = std.json.Formatter(Event){ .value = event, .options = .{} },
         }) catch unreachable;
 
         writer.writeAll(buffer_stream.getWritten()) catch |err| {

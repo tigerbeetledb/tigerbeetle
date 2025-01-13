@@ -31,20 +31,17 @@ pub const Event = union(enum) {
 
     pub const EventTag = std.meta.Tag(Event);
 
-    pub fn format(
-        event: *const Event,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-
-        try writer.writeAll(@tagName(event.*));
-        switch (event.*) {
-            inline else => |data| {
-                if (@TypeOf(data) != void) {
-                    try writer.print(":{}", .{struct_format(data)});
+    /// Normally, Zig would stringify a union(enum) like this as `{"compact_beat": {"tree": ...}}`.
+    /// Remove this extra layer of indirection.
+    pub fn jsonStringify(event: Event, jw: anytype) !void {
+        switch (event) {
+            inline else => |payload, tag| {
+                if (@TypeOf(payload) == void) {
+                    try jw.write("");
+                } else if (tag == .replica_commit) {
+                    try jw.write(@tagName(payload.stage));
+                } else {
+                    try jw.write(payload);
                 }
             },
         }
@@ -52,27 +49,69 @@ pub const Event = union(enum) {
 
     pub fn event_tracing(event: *const Event) EventTracing {
         return switch (event.*) {
-            .replica_sync_table => |event_unwrapped| .{ .replica_sync_table = .{ .index = event_unwrapped.index } },
-            .lookup_worker => |event_unwrapped| .{ .lookup_worker = .{ .index = event_unwrapped.index } },
-            .scan_tree => |event_unwrapped| .{ .scan_tree = .{ .index = event_unwrapped.index } },
-            .scan_tree_level => |event_unwrapped| .{ .scan_tree_level = .{ .index = event_unwrapped.index, .level = event_unwrapped.level } },
-            .grid_read => |event_unwrapped| .{ .grid_read = .{ .iop = event_unwrapped.iop } },
-            .grid_write => |event_unwrapped| .{ .grid_write = .{ .iop = event_unwrapped.iop } },
+            .replica_sync_table => |event_unwrapped| .{ .replica_sync_table = .{
+                .index = event_unwrapped.index,
+            } },
+            .lookup_worker => |event_unwrapped| .{
+                .lookup_worker = .{ .index = event_unwrapped.index },
+            },
+            .scan_tree => |event_unwrapped| .{
+                .scan_tree = .{ .index = event_unwrapped.index },
+            },
+            .scan_tree_level => |event_unwrapped| .{
+                .scan_tree_level = .{
+                    .index = event_unwrapped.index,
+                    .level = event_unwrapped.level,
+                },
+            },
+            .grid_read => |event_unwrapped| .{
+                .grid_read = .{ .iop = event_unwrapped.iop },
+            },
+            .grid_write => |event_unwrapped| .{
+                .grid_write = .{ .iop = event_unwrapped.iop },
+            },
             inline else => |_, tag| tag,
         };
     }
 
     pub fn event_timing(event: *const Event) EventTiming {
         return switch (event.*) {
-            .replica_commit => |event_unwrapped| .{ .replica_commit = .{ .stage = event_unwrapped.stage } },
-            .compact_beat => |event_unwrapped| .{ .compact_beat = .{ .tree = event_unwrapped.tree, .level_b = event_unwrapped.level_b } },
-            .compact_beat_merge => |event_unwrapped| .{ .compact_beat_merge = .{ .tree = event_unwrapped.tree, .level_b = event_unwrapped.level_b } },
-            .compact_mutable => |event_unwrapped| .{ .compact_mutable = .{ .tree = event_unwrapped.tree } },
-            .compact_mutable_suffix => |event_unwrapped| .{ .compact_mutable_suffix = .{ .tree = event_unwrapped.tree } },
-            .lookup => |event_unwrapped| .{ .lookup = .{ .tree = event_unwrapped.tree } },
-            .lookup_worker => |event_unwrapped| .{ .lookup_worker = .{ .tree = event_unwrapped.tree } },
-            .scan_tree => |event_unwrapped| .{ .scan_tree = .{ .tree = event_unwrapped.tree } },
-            .scan_tree_level => |event_unwrapped| .{ .scan_tree_level = .{ .tree = event_unwrapped.tree, .level = event_unwrapped.level } },
+            .replica_commit => |event_unwrapped| .{
+                .replica_commit = .{ .stage = event_unwrapped.stage },
+            },
+            .compact_beat => |event_unwrapped| .{
+                .compact_beat = .{
+                    .tree = event_unwrapped.tree,
+                    .level_b = event_unwrapped.level_b,
+                },
+            },
+            .compact_beat_merge => |event_unwrapped| .{
+                .compact_beat_merge = .{
+                    .tree = event_unwrapped.tree,
+                    .level_b = event_unwrapped.level_b,
+                },
+            },
+            .compact_mutable => |event_unwrapped| .{
+                .compact_mutable = .{ .tree = event_unwrapped.tree },
+            },
+            .compact_mutable_suffix => |event_unwrapped| .{
+                .compact_mutable_suffix = .{ .tree = event_unwrapped.tree },
+            },
+            .lookup => |event_unwrapped| .{
+                .lookup = .{ .tree = event_unwrapped.tree },
+            },
+            .lookup_worker => |event_unwrapped| .{
+                .lookup_worker = .{ .tree = event_unwrapped.tree },
+            },
+            .scan_tree => |event_unwrapped| .{
+                .scan_tree = .{ .tree = event_unwrapped.tree },
+            },
+            .scan_tree_level => |event_unwrapped| .{
+                .scan_tree_level = .{
+                    .tree = event_unwrapped.tree,
+                    .level = event_unwrapped.level,
+                },
+            },
             inline else => |_, tag| tag,
         };
     }
@@ -201,9 +240,7 @@ pub const EventTracing = union(Event.EventTag) {
 
         switch (event.*) {
             inline else => |data| {
-                if (@TypeOf(data) != void) {
-                    try writer.print("{}", .{struct_format(data)});
-                }
+                try writer.print("{}", .{event_equals_format(data)});
             },
         }
     }
@@ -268,6 +305,8 @@ pub const EventTiming = union(Event.EventTag) {
         break :count count;
     };
 
+    // Unlike with EventTracing, which neatly organizes related events underneath one another, the
+    // order here does not matter.
     pub fn stack(event: *const EventTiming) u32 {
         switch (event.*) {
             // Single payload: CommitStage
@@ -325,9 +364,7 @@ pub const EventTiming = union(Event.EventTag) {
 
         switch (event.*) {
             inline else => |data| {
-                if (@TypeOf(data) != void) {
-                    try writer.print("{}", .{struct_format(data)});
-                }
+                try writer.print("{}", .{event_equals_format(data)});
             },
         }
     }
@@ -384,8 +421,21 @@ pub const EventMetric = union(enum) {
     }
 };
 
-fn StructFormatterType(comptime Data: type) type {
-    assert(@typeInfo(Data) == .Struct);
+/// Format EventTiming and EventMetric's payload (ie, the tags) with a space separated k=v format.
+fn EventEqualsFormatter(comptime Data: type) type {
+    assert(@typeInfo(Data) == .Struct or @typeInfo(Data) == .Void);
+
+    if (@typeInfo(Data) == .Void) {
+        return struct {
+            data: Data,
+            pub fn format(
+                _: *const @This(),
+                comptime _: []const u8,
+                _: std.fmt.FormatOptions,
+                _: anytype,
+            ) !void {}
+        };
+    }
 
     return struct {
         data: Data,
@@ -426,15 +476,15 @@ fn StructFormatterType(comptime Data: type) type {
     };
 }
 
-pub fn struct_format(
+pub fn event_equals_format(
     data: anytype,
-) StructFormatterType(@TypeOf(data)) {
-    return StructFormatterType(@TypeOf(data)){ .data = data };
+) EventEqualsFormatter(@TypeOf(data)) {
+    return EventEqualsFormatter(@TypeOf(data)){ .data = data };
 }
 
 pub const EventTimingAggregate = struct {
     event: EventTiming,
-    timing: struct { // FIXME: -> value
+    values: struct {
         duration_min_us: u64,
         duration_max_us: u64,
         duration_sum_us: u64,

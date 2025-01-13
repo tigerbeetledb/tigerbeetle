@@ -72,7 +72,7 @@ pub const StatsD = struct {
 
         for (events_aggregate, 0..) |maybe_event_aggregate, i| {
             if (maybe_event_aggregate) |event_timing| {
-                const timing = event_timing.timing;
+                const values = event_timing.values;
                 const field_name = switch (event_timing.event) {
                     inline else => |_, tag| @tagName(tag),
                 };
@@ -82,11 +82,11 @@ pub const StatsD = struct {
 
                 inline for (.{ .min, .avg, .max, .sum, .count }) |aggregation| {
                     const value = switch (aggregation) {
-                        .min => timing.duration_min_us,
-                        .avg => @divFloor(timing.duration_sum_us, timing.count),
-                        .max => timing.duration_max_us,
-                        .sum => timing.duration_sum_us,
-                        .count => timing.count,
+                        .min => values.duration_min_us,
+                        .avg => @divFloor(values.duration_sum_us, values.count),
+                        .max => values.duration_max_us,
+                        .sum => values.duration_sum_us,
+                        .count => values.count,
                         else => unreachable,
                     };
                     const single_metric = try std.fmt.bufPrint(
