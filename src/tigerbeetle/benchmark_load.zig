@@ -23,7 +23,6 @@ const MessageBus = vsr.message_bus.MessageBusClient;
 const StateMachine = vsr.state_machine.StateMachineType(Storage, constants.state_machine_config);
 const Client = vsr.ClientType(StateMachine, MessageBus);
 const tb = vsr.tigerbeetle;
-const StatsD = vsr.statsd.StatsD;
 const IdPermutation = vsr.testing.IdPermutation;
 const ZipfianGenerator = stdx.ZipfianGenerator;
 const ZipfianShuffled = stdx.ZipfianShuffled;
@@ -118,16 +117,16 @@ pub fn main(
         try std.ArrayListUnmanaged(u128).initCapacity(allocator, cli_args.transfer_batch_size);
     defer batch_transfer_ids.deinit(allocator);
 
-    var statsd_opt: ?StatsD = null;
-    defer if (statsd_opt) |*statsd| statsd.deinit(allocator);
+    // var statsd_opt: ?StatsD = null;
+    // defer if (statsd_opt) |*statsd| statsd.deinit(allocator);
 
-    if (cli_args.statsd) {
-        statsd_opt = try StatsD.init(
-            allocator,
-            &io,
-            std.net.Address.parseIp4("127.0.0.1", 8125) catch unreachable,
-        );
-    }
+    // if (cli_args.statsd) {
+    //     statsd_opt = try StatsD.init(
+    //         allocator,
+    //         &io,
+    //         std.net.Address.parseIp4("127.0.0.1", 8125) catch unreachable,
+    //     );
+    // }
 
     // If no seed was given, use a default seed for reproducibility.
     const seed = seed_from_arg: {
@@ -194,7 +193,7 @@ pub fn main(
         .transfer_next_arrival_ns = 0,
         .callback = null,
         .done = false,
-        .statsd = if (statsd_opt) |*statsd| statsd else null,
+        .statsd = null, //if (statsd_opt) |*statsd| statsd else null,
         .print_batch_timings = cli_args.print_batch_timings,
         .id_order = cli_args.id_order,
         .batch_account_ids = batch_account_ids,
@@ -304,7 +303,7 @@ const Benchmark = struct {
     transfer_next_arrival_ns: usize,
     callback: ?*const fn (*Benchmark, StateMachine.Operation, u64, []const u8) void,
     done: bool,
-    statsd: ?*StatsD,
+    statsd: ?*anyopaque,
     print_batch_timings: bool,
     id_order: cli.Command.Benchmark.IdOrder,
     batch_account_ids: std.ArrayListUnmanaged(u128),
@@ -544,12 +543,12 @@ const Benchmark = struct {
         b.batch_index += 1;
         b.transfers_sent += b.batch_transfers.items.len;
 
-        if (b.statsd) |statsd| {
-            statsd.gauge("benchmark.txns", b.batch_transfers.items.len) catch {};
-            statsd.timing("benchmark.timings", ms_time) catch {};
-            statsd.gauge("benchmark.batch", b.batch_index) catch {};
-            statsd.gauge("benchmark.completed", b.transfers_sent) catch {};
-        }
+        // if (b.statsd) |statsd| {
+        //     statsd.gauge("benchmark.txns", b.batch_transfers.items.len) catch {};
+        //     statsd.timing("benchmark.timings", ms_time) catch {};
+        //     statsd.gauge("benchmark.batch", b.batch_index) catch {};
+        //     statsd.gauge("benchmark.completed", b.transfers_sent) catch {};
+        // }
 
         std.time.sleep(b.transfer_batch_delay_us * std.time.ns_per_us);
         b.create_transfers();

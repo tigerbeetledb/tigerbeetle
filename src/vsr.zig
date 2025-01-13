@@ -25,7 +25,6 @@ pub const grid = @import("vsr/grid.zig");
 pub const superblock = @import("vsr/superblock.zig");
 pub const aof = @import("aof.zig");
 pub const repl = @import("repl.zig");
-pub const statsd = @import("statsd.zig");
 pub const lsm = .{
     .tree = @import("lsm/tree.zig"),
     .groove = @import("lsm/groove.zig"),
