@@ -18,12 +18,12 @@ const BufferCompletion = struct {
     completion: IO.Completion = undefined,
 };
 
-// fixme: hmm pop push and pointers
 const BufferCompletionRing = RingBufferType(*BufferCompletion, .{ .array = max_packet_count });
 
 pub const StatsD = struct {
     socket: std.posix.socket_t,
     io: *IO,
+
     buffer_completions: BufferCompletionRing,
     buffer_completions_buffer: []BufferCompletion,
 
@@ -54,6 +54,7 @@ pub const StatsD = struct {
         };
     }
 
+    // FIXME: io cancellation?
     pub fn deinit(self: *StatsD, allocator: std.mem.Allocator) void {
         self.io.close_socket(self.socket);
         allocator.free(self.buffer_completions_buffer);
@@ -129,6 +130,8 @@ pub const StatsD = struct {
                 self.socket,
                 buffer_completion.buffer[0..index],
             );
+        } else {
+            self.buffer_completions.push_assume_capacity(buffer_completion);
         }
     }
 
@@ -191,8 +194,11 @@ pub const StatsD = struct {
                 self.socket,
                 buffer_completion.buffer[0..index],
             );
+        } else {
+            self.buffer_completions.push_assume_capacity(buffer_completion);
         }
     }
+
     fn send_callback(
         self: *StatsD,
         completion: *IO.Completion,
@@ -206,6 +212,8 @@ pub const StatsD = struct {
     }
 };
 
+/// Format EventTiming and EventMetric's payload (ie, the tags) in a dogstatsd compatible way:
+/// Tags are comma separated, with a `:` between key:value pairs.
 fn EventStatsdTagFormatter(EventType: type) type {
     return struct {
         event: EventType,
