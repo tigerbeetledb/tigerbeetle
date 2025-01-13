@@ -136,7 +136,7 @@ pub fn TreeType(comptime TreeTable: type, comptime Storage: type) type {
             });
             errdefer tree.table_immutable.deinit(allocator);
 
-            try tree.manifest.init(allocator, node_pool, config);
+            try tree.manifest.init(allocator, node_pool, config, grid.trace);
             errdefer tree.manifest.deinit(allocator);
 
             for (0..tree.compactions.len) |i| {

@@ -100,7 +100,9 @@ const assert = std.debug.assert;
 const log = std.log.scoped(.trace);
 
 const constants = @import("constants.zig");
+const IO = @import("io.zig").IO;
 
+const Metrics = @import("trace/metric.zig").Metrics;
 const Event = @import("trace/event.zig").Event;
 const EventTracing = @import("trace/event.zig").EventTracing;
 const EventTiming = @import("trace/event.zig").EventTiming;
@@ -114,7 +116,7 @@ pub const Tracer = struct {
     buffer: []u8,
 
     events_started: [EventTracing.stack_count]?u64 = .{null} ** EventTracing.stack_count,
-    events_aggregate: []?EventAggregate,
+    metrics: Metrics,
 
     time_start: std.time.Instant,
     timer: std.time.Timer,
@@ -122,6 +124,10 @@ pub const Tracer = struct {
     pub const Options = struct {
         /// The tracer still validates start/stop state even when writer=null.
         writer: ?std.io.AnyWriter = null,
+
+        // For metrics: FIXME
+        io: ?*IO = null,
+        // FIXME: Add statsd address etc. Or move it up and make anytype? PRobs too much for now.
     };
 
     pub fn init(allocator: std.mem.Allocator, replica_index: u8, options: Options) !Tracer {
@@ -132,17 +138,15 @@ pub const Tracer = struct {
         const buffer = try allocator.alloc(u8, trace_span_size_max);
         errdefer allocator.free(buffer);
 
-        const events_aggregate = try allocator.alloc(?EventAggregate, EventTiming.stack_count);
-        errdefer allocator.free(events_aggregate);
-
-        @memset(events_aggregate, null);
+        const metrics = try Metrics.init(allocator, options.io.?);
+        errdefer metrics.deinit(allocator);
 
         return .{
             .replica_index = replica_index,
             .options = options,
             .buffer = buffer,
 
-            .events_aggregate = events_aggregate,
+            .metrics = metrics,
 
             .time_start = std.time.Instant.now() catch @panic("std.time.Instant.now() unsupported"),
             .timer = std.time.Timer.start() catch @panic("std.time.Timer.start() unsupported"),
@@ -151,7 +155,7 @@ pub const Tracer = struct {
 
     pub fn deinit(tracer: *Tracer, allocator: std.mem.Allocator) void {
         allocator.free(tracer.buffer);
-        allocator.free(tracer.events_aggregate);
+        tracer.metrics.deinit(allocator);
         tracer.* = undefined;
     }
 
@@ -229,31 +233,7 @@ pub const Tracer = struct {
             if (duration_ns < us_log_threshold_ns) "us" else "ms",
         });
 
-        const timing_stack = event_timing.stack();
-
-        if (tracer.events_aggregate[timing_stack] == null) {
-            tracer.events_aggregate[timing_stack] = .{
-                .event = event_timing,
-                .timing = .{
-                    .duration_min_us = duration_us,
-                    .duration_max_us = duration_us,
-                    .duration_sum_us = duration_us,
-                    .count = 1,
-                },
-            };
-        } else {
-            const timing = tracer.events_aggregate[timing_stack].?.timing;
-            // Certain high cardinality data (eg, op) _can_ differ.
-            // Maybe assert and gate on constants.verify
-            //maybe(tracer.events_aggregate[timing_stack].?.event == event_timing);
-
-            tracer.events_aggregate[timing_stack].?.timing = .{
-                .duration_min_us = @min(timing.duration_min_us, duration_us),
-                .duration_max_us = @max(timing.duration_max_us, duration_us),
-                .duration_sum_us = timing.duration_sum_us + duration_us,
-                .count = timing.count + 1,
-            };
-        }
+        tracer.metrics.timing(event_timing, duration_us);
 
         tracer.write_stop(stack);
     }
@@ -299,29 +279,6 @@ pub const Tracer = struct {
         writer.writeAll(buffer_stream.getWritten()) catch |err| {
             std.debug.panic("Tracer.stop: {}\n", .{err});
         };
-    }
-
-    pub fn emit(tracer: *Tracer) void {
-        // TODO: Trace and emit emitting :)
-        // At some point, would it be more efficient to use a hashmap here...?
-        for (tracer.events_aggregate, 0..) |maybe_event_aggregate, i| {
-            if (maybe_event_aggregate) |event_timing| {
-                const timing = event_timing.timing;
-                const field_name = switch (event_timing.event) {
-                    inline else => |_, tag| @tagName(tag),
-                };
-                log.info("{s}: p0={?}us mean={}us p100={?}us " ++
-                    "sum={}us count={}", .{
-                    field_name,
-                    timing.duration_min_us,
-                    @divFloor(timing.duration_sum_us, timing.count),
-                    timing.duration_max_us,
-                    timing.duration_sum_us,
-                    timing.count,
-                });
-                tracer.events_aggregate[i] = null;
-            }
-        }
     }
 };
 

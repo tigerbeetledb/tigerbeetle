@@ -3376,7 +3376,9 @@ pub fn ReplicaType(
             assert(self.grid_scrub_timeout.ticking);
             self.grid_scrub_timeout.reset();
 
-            self.trace.emit();
+            self.trace.start(.metrics_emit);
+            self.trace.metrics.emit() catch {};
+            self.trace.stop(.metrics_emit);
 
             if (!self.state_machine_opened) return;
             if (self.syncing != .idle) return;

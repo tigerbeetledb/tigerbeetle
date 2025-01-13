@@ -27,6 +27,8 @@ pub const Event = union(enum) {
     grid_read: struct { iop: usize },
     grid_write: struct { iop: usize },
 
+    metrics_emit: void,
+
     pub const EventTag = std.meta.Tag(Event);
 
     pub fn format(
@@ -50,39 +52,28 @@ pub const Event = union(enum) {
 
     pub fn event_tracing(event: *const Event) EventTracing {
         return switch (event.*) {
-            .replica_commit => .replica_commit,
-            .replica_aof_write => .replica_aof_write,
             .replica_sync_table => |event_unwrapped| .{ .replica_sync_table = .{ .index = event_unwrapped.index } },
-            .compact_beat => .compact_beat,
-            .compact_beat_merge => .compact_beat_merge,
-            .compact_manifest => .compact_manifest,
-            .compact_mutable => .compact_mutable,
-            .compact_mutable_suffix => .compact_mutable_suffix,
-            .lookup => .lookup,
             .lookup_worker => |event_unwrapped| .{ .lookup_worker = .{ .index = event_unwrapped.index } },
             .scan_tree => |event_unwrapped| .{ .scan_tree = .{ .index = event_unwrapped.index } },
             .scan_tree_level => |event_unwrapped| .{ .scan_tree_level = .{ .index = event_unwrapped.index, .level = event_unwrapped.level } },
             .grid_read => |event_unwrapped| .{ .grid_read = .{ .iop = event_unwrapped.iop } },
             .grid_write => |event_unwrapped| .{ .grid_write = .{ .iop = event_unwrapped.iop } },
+            inline else => |_, tag| tag,
         };
     }
 
     pub fn event_timing(event: *const Event) EventTiming {
         return switch (event.*) {
             .replica_commit => |event_unwrapped| .{ .replica_commit = .{ .stage = event_unwrapped.stage } },
-            .replica_aof_write => .replica_aof_write,
-            .replica_sync_table => .replica_sync_table,
             .compact_beat => |event_unwrapped| .{ .compact_beat = .{ .tree = event_unwrapped.tree, .level_b = event_unwrapped.level_b } },
             .compact_beat_merge => |event_unwrapped| .{ .compact_beat_merge = .{ .tree = event_unwrapped.tree, .level_b = event_unwrapped.level_b } },
-            .compact_manifest => .compact_manifest,
             .compact_mutable => |event_unwrapped| .{ .compact_mutable = .{ .tree = event_unwrapped.tree } },
             .compact_mutable_suffix => |event_unwrapped| .{ .compact_mutable_suffix = .{ .tree = event_unwrapped.tree } },
             .lookup => |event_unwrapped| .{ .lookup = .{ .tree = event_unwrapped.tree } },
             .lookup_worker => |event_unwrapped| .{ .lookup_worker = .{ .tree = event_unwrapped.tree } },
             .scan_tree => |event_unwrapped| .{ .scan_tree = .{ .tree = event_unwrapped.tree } },
             .scan_tree_level => |event_unwrapped| .{ .scan_tree_level = .{ .tree = event_unwrapped.tree, .level = event_unwrapped.level } },
-            .grid_read => .grid_read,
-            .grid_write => .grid_write,
+            inline else => |_, tag| tag,
         };
     }
 };
@@ -120,6 +111,8 @@ pub const EventTracing = union(Event.EventTag) {
     grid_read: struct { iop: usize },
     grid_write: struct { iop: usize },
 
+    metrics_emit: void,
+
     pub const stack_limits = std.enums.EnumArray(Event.EventTag, u32).init(.{
         .replica_commit = 1,
         .replica_aof_write = 1,
@@ -135,6 +128,7 @@ pub const EventTracing = union(Event.EventTag) {
         .scan_tree_level = constants.lsm_scans_max * @as(u32, constants.lsm_levels),
         .grid_read = constants.grid_iops_read_max,
         .grid_write = constants.grid_iops_write_max,
+        .metrics_emit = 1,
     });
 
     pub const stack_bases = array: {
@@ -235,6 +229,8 @@ pub const EventTiming = union(Event.EventTag) {
     grid_read,
     grid_write,
 
+    metrics_emit: void,
+
     // FIXME: Exhaustively test these with a test. Easy enough!
     pub const stack_limits = std.enums.EnumArray(Event.EventTag, u32).init(.{
         .replica_commit = std.meta.fields(CommitStage).len,
@@ -251,6 +247,7 @@ pub const EventTiming = union(Event.EventTag) {
         .scan_tree_level = (std.meta.fields(TreeEnum).len + 1) * @as(u32, constants.lsm_levels),
         .grid_read = 1,
         .grid_write = 1,
+        .metrics_emit = 1,
     });
 
     pub const stack_bases = array: {
@@ -336,6 +333,57 @@ pub const EventTiming = union(Event.EventTag) {
     }
 };
 
+pub const EventMetric = union(enum) {
+    const EventTag = std.meta.Tag(EventMetric);
+
+    table_count_visible: struct { tree: TreeEnum, level: u8 },
+    table_count_visible_max: struct { tree: TreeEnum, level: u8 },
+
+    // FIXME: Exhaustively test these with a test. Easy enough!
+    pub const stack_limits = std.enums.EnumArray(EventTag, u32).init(.{
+        .table_count_visible = (std.meta.fields(TreeEnum).len + 1) * @as(u32, constants.lsm_levels),
+        .table_count_visible_max = (std.meta.fields(TreeEnum).len + 1) * @as(u32, constants.lsm_levels),
+    });
+
+    pub const stack_bases = array: {
+        var array = std.enums.EnumArray(EventTag, u32).initDefault(0, .{});
+        var next: u32 = 0;
+        for (std.enums.values(EventTag)) |event_type| {
+            array.set(event_type, next);
+            next += stack_limits.get(event_type);
+        }
+        break :array array;
+    };
+
+    pub const stack_count = count: {
+        var count: u32 = 0;
+        for (std.enums.values(EventTag)) |event_type| {
+            count += stack_limits.get(event_type);
+        }
+        break :count count;
+    };
+
+    pub fn stack(event: *const EventMetric) u32 {
+        switch (event.*) {
+            // Double payload: TreeEnum + level
+            inline .table_count_visible, .table_count_visible_max => |data| {
+                const tree_id = @intFromEnum(data.tree);
+                const level = data.level;
+                const offset = tree_id * constants.lsm_levels + level;
+                assert(offset < stack_limits.get(event.*));
+
+                return stack_bases.get(event.*) + @as(u32, @intCast(offset));
+            },
+            // inline else => |data, event_tag| {
+            //     comptime assert(@TypeOf(data) == void);
+            //     comptime assert(stack_limits.get(event_tag) == 1);
+
+            //     return comptime stack_bases.get(event_tag);
+            // },
+        }
+    }
+};
+
 fn StructFormatterType(comptime Data: type) type {
     assert(@typeInfo(Data) == .Struct);
 
@@ -384,13 +432,18 @@ pub fn struct_format(
     return StructFormatterType(@TypeOf(data)){ .data = data };
 }
 
-pub const EventAggregate = struct {
+pub const EventTimingAggregate = struct {
     event: EventTiming,
-    timing: struct {
+    timing: struct { // FIXME: -> value
         duration_min_us: u64,
         duration_max_us: u64,
         duration_sum_us: u64,
 
         count: u64,
     },
+};
+
+pub const EventMetricAggregate = struct {
+    event: EventMetric,
+    value: u64,
 };
