@@ -90,7 +90,7 @@ pub const StatsD = struct {
                     };
                     const single_metric = try std.fmt.bufPrint(
                         &single_buffer,
-                        "tigerbeetle.{s}.{s}:{}|g|#{s}\n",
+                        "tigerbeetle.{s}_us.{s}:{}|g|#{s}\n",
                         .{ field_name, @tagName(aggregation), value, event_timing_tag_formatter },
                     );
 
@@ -198,7 +198,9 @@ pub const StatsD = struct {
         completion: *IO.Completion,
         result: IO.SendError!usize,
     ) void {
-        _ = result catch {};
+        _ = result catch |e| {
+            std.log.warn("error sending metric: {}", .{e});
+        };
         const buffer_completion: *BufferCompletion = @fieldParentPtr("completion", completion);
         self.buffer_completions.push_assume_capacity(buffer_completion);
     }

@@ -280,6 +280,14 @@ pub const Tracer = struct {
             std.debug.panic("Tracer.stop: {}\n", .{err});
         };
     }
+
+    pub fn emit(tracer: *Tracer) void {
+        tracer.start(.metrics_emit);
+        tracer.metrics.emit() catch |e| {
+            log.warn("error while emitting metrics: {}", .{e});
+        };
+        tracer.stop(.metrics_emit);
+    }
 };
 
 test "trace json" {

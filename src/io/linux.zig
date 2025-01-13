@@ -698,6 +698,8 @@ pub const IO = struct {
                                 .ALREADY => error.FastOpenAlreadyInProgress,
                                 .AFNOSUPPORT => error.AddressFamilyNotSupported,
                                 .BADF => error.FileDescriptorInvalid,
+                                // Can happen when send()'ing to a UDP socket.
+                                .CONNREFUSED => error.ConnectionRefused,
                                 .CONNRESET => error.ConnectionResetByPeer,
                                 .DESTADDRREQ => unreachable,
                                 .FAULT => unreachable,
@@ -1188,6 +1190,7 @@ pub const IO = struct {
         OperationNotSupported,
         BrokenPipe,
         ConnectionTimedOut,
+        ConnectionRefused,
     } || posix.UnexpectedError;
 
     pub fn send(

@@ -564,6 +564,7 @@ pub fn ReplicaType(
         commit_prepare: ?*Message.Prepare = null,
 
         trace: vsr.trace.Tracer,
+        trace_emit_timeout: Timeout,
 
         aof: ?*AOF,
 
@@ -850,6 +851,8 @@ pub fn ReplicaType(
             // Asynchronously open the free set and then the (Forest inside) StateMachine so that we
             // can repair grid blocks if necessary:
             self.grid.open(grid_open_callback);
+
+            self.trace_emit_timeout.start();
         }
 
         fn superblock_open_callback(superblock_context: *SuperBlock.Context) void {
@@ -1279,6 +1282,11 @@ pub fn ReplicaType(
                     .id = replica_index,
                     .after = 500,
                 },
+                .trace_emit_timeout = Timeout{
+                    .name = "trace_emit_timeout",
+                    .id = replica_index,
+                    .after = 100,
+                },
                 .prng = std.rand.DefaultPrng.init(replica_index),
 
                 .trace = self.trace,
@@ -1377,6 +1385,7 @@ pub fn ReplicaType(
                 .{ &self.upgrade_timeout, on_upgrade_timeout },
                 .{ &self.pulse_timeout, on_pulse_timeout },
                 .{ &self.grid_scrub_timeout, on_grid_scrub_timeout },
+                .{ &self.trace_emit_timeout, on_trace_emit_timeout },
             };
 
             inline for (timeouts) |timeout| {
@@ -3376,10 +3385,6 @@ pub fn ReplicaType(
             assert(self.grid_scrub_timeout.ticking);
             self.grid_scrub_timeout.reset();
 
-            self.trace.start(.metrics_emit);
-            self.trace.metrics.emit() catch {};
-            self.trace.stop(.metrics_emit);
-
             if (!self.state_machine_opened) return;
             if (self.syncing != .idle) return;
             if (self.sync_tables != null) return;
@@ -3417,6 +3422,13 @@ pub fn ReplicaType(
                 const scrub_next = self.grid_scrubber.read_next();
                 if (!scrub_next) break;
             } else unreachable;
+        }
+
+        fn on_trace_emit_timeout(self: *Replica) void {
+            assert(self.trace_emit_timeout.ticking);
+            self.trace_emit_timeout.reset();
+
+            self.trace.emit();
         }
 
         fn on_pulse_timeout(self: *Replica) void {
