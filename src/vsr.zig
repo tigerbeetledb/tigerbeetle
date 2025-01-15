@@ -1577,7 +1577,8 @@ pub const Checkpoint = struct {
         if (trigger_for_checkpoint(checkpoint)) |trigger| {
             return commit_max > (trigger + constants.pipeline_prepare_queue_max);
         } else {
-            return true;
+            assert(checkpoint == 0);
+            return true; // Root checkpoint is alway durable.
         }
     }
 

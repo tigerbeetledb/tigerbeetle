@@ -6281,24 +6281,10 @@ pub fn ReplicaType(
             assert(self.op <= self.op_prepare_max_sync());
             assert(self.commit_max >= self.op -| constants.pipeline_prepare_queue_max);
 
-            const repair_min = repair_min: {
-                if (self.op_checkpoint() == 0) {
-                    break :repair_min 0;
-                }
-
-                if (vsr.Checkpoint.durable(self.op_checkpoint(), self.commit_max)) {
-                    if (self.op == self.op_checkpoint()) {
-                        // Don't allow "op_repair_min > op_head".
-                        // See https://github.com/tigerbeetle/tigerbeetle/pull/1589 for why
-                        // this is required.
-                        break :repair_min self.op_checkpoint();
-                    }
-                    break :repair_min self.op_checkpoint() + 1;
-                } else {
-                    break :repair_min (self.op_checkpoint() + 1) -|
-                        constants.vsr_checkpoint_ops;
-                }
-            };
+            const repair_min = if (vsr.Checkpoint.durable(self.op_checkpoint(), self.commit_max))
+                self.op_checkpoint()
+            else
+                self.op_checkpoint() - constants.vsr_checkpoint_ops;
 
             assert(repair_min <= self.op);
             assert(repair_min <= self.commit_min + 1);
