@@ -500,6 +500,11 @@ pub fn ClockType(comptime Time: type) type {
                 const interval = Marzullo.smallest_interval(self.window_tuples(tolerance));
                 if (interval.sources_true < self.quorum) break;
 
+                const accuracy = interval.upper_bound - interval.lower_bound;
+                if (accuracy > 2 * clock_offset_tolerance_max) {
+                    continue; // Interval too wide due to large RTT of samples.
+                }
+
                 // The new interval may reduce the number of `sources_true` while also decreasing
                 // error. In other words, provided we maintain a quorum, we prefer tighter tolerance
                 // bounds.
@@ -513,9 +518,11 @@ pub fn ClockType(comptime Time: type) type {
             // for the operator, as the counterpoint to `no agreement on cluster time`.
             if (self.epoch.synchronized == null and self.window.synchronized != null) {
                 const new_interval = self.window.synchronized.?;
+                const accuracy = new_interval.upper_bound - new_interval.lower_bound;
+                assert(accuracy <= 2 * clock_offset_tolerance_max);
                 log.info("{}: synchronized: accuracy={}", .{
                     self.replica,
-                    fmt.fmtDurationSigned(new_interval.upper_bound - new_interval.lower_bound),
+                    fmt.fmtDurationSigned(accuracy),
                 });
             }
 
