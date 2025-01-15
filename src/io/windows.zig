@@ -919,7 +919,11 @@ pub const IO = struct {
         fd: fd_t,
         buffer: []const u8,
         offset: u64,
+        options: struct { dsync: bool },
     ) void {
+        // Windows will fsync on every write for now.
+        _ = options;
+
         self.submit(
             context,
             callback,

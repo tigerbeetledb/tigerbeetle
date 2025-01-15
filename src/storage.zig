@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
 const maybe = stdx.maybe;
@@ -72,11 +73,17 @@ pub fn StorageType(comptime IO: type) type {
             }
         };
 
+        pub const Flush = struct {
+            completion: IO.Completion,
+            callback: *const fn (write: *Storage.Flush) void,
+        };
+
         pub const Write = struct {
             completion: IO.Completion,
             callback: *const fn (write: *Storage.Write) void,
             buffer: []const u8,
             offset: u64,
+            dsync: bool,
         };
 
         pub const NextTick = struct {
@@ -342,9 +349,20 @@ pub fn StorageType(comptime IO: type) type {
             buffer: []const u8,
             zone: vsr.Zone,
             offset_in_zone: u64,
+            options: struct {
+                dsync: bool = true,
+                format: bool = false,
+            },
         ) void {
             zone.verify_iop(buffer, offset_in_zone);
             maybe(zone == .grid_padding); // Padding is zeroed during format.
+
+            if (!options.dsync) {
+                // Non-dsync writes normally only make sense for the grid, and even then, only for
+                // blocks created by compaction (not state sync!). That's relaxed when formatting,
+                // however.
+                assert(zone == .grid or options.format);
+            }
 
             const offset_in_storage = zone.offset(offset_in_zone);
             write.* = .{
@@ -352,6 +370,7 @@ pub fn StorageType(comptime IO: type) type {
                 .callback = callback,
                 .buffer = buffer,
                 .offset = offset_in_storage,
+                .dsync = options.dsync,
             };
 
             self.start_write(write);
@@ -371,6 +390,7 @@ pub fn StorageType(comptime IO: type) type {
                 self.fd,
                 write.buffer,
                 write.offset,
+                .{ .dsync = write.dsync },
             );
         }
 
@@ -419,6 +439,39 @@ pub fn StorageType(comptime IO: type) type {
             }
 
             self.start_write(write);
+        }
+
+        pub fn flush_sectors(
+            self: *Storage,
+            callback: *const fn (flush: *Storage.Flush) void,
+            flush: *Storage.Flush,
+        ) void {
+            // Windows doesn't have per IO fsync support yet - it runs with FILE_WRITE_THROUGH which
+            // is the same as O_DSYNC.
+            if (builtin.os.tag == .windows) {
+                return self.on_fsync(&flush.completion, {});
+            }
+
+            flush.* = .{
+                .completion = undefined,
+                .callback = callback,
+            };
+
+            self.io.fsync(
+                *Storage,
+                self,
+                on_fsync,
+                &flush.completion,
+                self.fd,
+            );
+        }
+
+        fn on_fsync(self: *Storage, completion: *IO.Completion, result: IO.FsyncError!void) void {
+            _ = self;
+            _ = result catch @panic("fsync failure");
+
+            const flush: *Storage.Flush = @fieldParentPtr("completion", completion);
+            flush.callback(flush);
         }
 
         /// Ensures that the read or write is within bounds and intends to read or write some bytes.

@@ -236,6 +236,7 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
         compaction_schedule: CompactionSchedule,
 
         scan_buffer_pool: ScanBufferPool,
+        flush: Grid.Flush = undefined,
 
         pub fn init(
             forest: *Forest,
@@ -527,6 +528,17 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
             if ((last_beat or last_half_beat) and op > constants.lsm_compaction_ops) {
                 forest.manifest_log.compact_end();
             }
+
+            forest.grid.superblock.storage.flush_sectors(flush_callback, &forest.flush);
+        }
+
+        pub fn flush_callback(flush: *Grid.Flush) void {
+            const forest: *Forest = @alignCast(@fieldParentPtr("flush", flush));
+
+            assert(forest.progress.? == .compact);
+            assert(forest.compaction_progress != null);
+            assert(forest.compaction_progress.?.trees_done);
+            assert(forest.compaction_progress.?.manifest_log_done);
 
             const callback = forest.progress.?.compact.callback;
             forest.progress = null;

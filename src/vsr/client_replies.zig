@@ -429,6 +429,7 @@ pub fn ClientRepliesType(comptime Storage: type) type {
                     message.buffer[0..size_ceil],
                     .client_replies,
                     slot_offset(write.slot),
+                    .{},
                 );
             }
         }

@@ -2047,6 +2047,7 @@ pub fn JournalType(comptime Replica: type, comptime Storage: type) type {
                     .prepares => .wal_prepares,
                 },
                 write.range.offset,
+                .{},
             );
             // We rely on the Storage.write_sectors() implementation being always synchronous,
             // in which case writes never actually need to be queued, or always asynchronous,

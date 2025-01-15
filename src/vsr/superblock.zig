@@ -1077,12 +1077,24 @@ pub fn SuperBlockType(comptime Storage: type) type {
 
             SuperBlock.assert_bounds(offset, buffer.len);
 
+            const options = .{
+                .dsync = context.caller != .format,
+                .format = context.caller == .format,
+            };
+
+            // Extra safety check:
+            if (context.caller != .format) {
+                assert(options.dsync);
+                assert(!options.format);
+            }
+
             superblock.storage.write_sectors(
                 write_header_callback,
                 &context.write,
                 buffer,
                 .superblock,
                 offset,
+                options,
             );
         }
 
