@@ -577,7 +577,7 @@ pub fn StateMachineType(
         prefetch_context: PrefetchContext = .null,
 
         scan_lookup: ScanLookup = .null,
-        scan_lookup_buffer: []u8,
+        scan_lookup_buffer: []align(16) u8,
         scan_lookup_result_count: ?u32 = null,
         scan_lookup_next_tick: Grid.NextTick = undefined,
 
@@ -740,7 +740,7 @@ pub fn StateMachineType(
         /// Returns the logical time increment (in nanoseconds) for the highest
         /// timestamp of the response.
         pub fn prepare_nanoseconds(
-            self: *StateMachine,
+            self: *const StateMachine,
             client_release: vsr.Release,
             operation: Operation,
             input: []const u8,
@@ -1013,11 +1013,11 @@ pub fn StateMachineType(
             if (self.get_scan_from_account_filter(filter)) |scan| {
                 assert(self.forest.scan_buffer_pool.scan_buffer_used > 0);
 
-                var scan_buffer: []Transfer = @alignCast(std.mem.bytesAsSlice(
+                var scan_buffer: []Transfer = std.mem.bytesAsSlice(
                     Transfer,
                     self.scan_lookup_buffer[0 .. @sizeOf(Transfer) *
                         constants.batch_max.get_account_transfers],
-                ));
+                );
                 assert(scan_buffer.len <= constants.batch_max.get_account_transfers);
 
                 var scan_lookup = self.scan_lookup.get(.transfers);
@@ -1092,12 +1092,10 @@ pub fn StateMachineType(
                     if (self.get_scan_from_account_filter(filter)) |scan| {
                         assert(self.forest.scan_buffer_pool.scan_buffer_used > 0);
 
-                        var scan_lookup_buffer: []AccountBalancesGrooveValue = @alignCast(
-                            std.mem.bytesAsSlice(
-                                AccountBalancesGrooveValue,
-                                self.scan_lookup_buffer[0 .. @sizeOf(AccountBalancesGrooveValue) *
-                                    constants.batch_max.get_account_balances],
-                            ),
+                        var scan_lookup_buffer: []AccountBalancesGrooveValue = std.mem.bytesAsSlice(
+                            AccountBalancesGrooveValue,
+                            self.scan_lookup_buffer[0 .. @sizeOf(AccountBalancesGrooveValue) *
+                                constants.batch_max.get_account_balances],
                         );
 
                         var scan_lookup = self.scan_lookup.get(.account_balances);
@@ -1334,11 +1332,11 @@ pub fn StateMachineType(
             )) |scan| {
                 assert(self.forest.scan_buffer_pool.scan_buffer_used > 0);
 
-                const scan_buffer: []Account = @alignCast(std.mem.bytesAsSlice(
+                const scan_buffer: []Account = std.mem.bytesAsSlice(
                     Account,
                     self.scan_lookup_buffer[0 .. @sizeOf(Account) *
                         constants.batch_max.query_accounts],
-                ));
+                );
                 assert(scan_buffer.len <= constants.batch_max.query_accounts);
 
                 const scan_lookup = self.scan_lookup.get(.accounts);
@@ -1393,11 +1391,11 @@ pub fn StateMachineType(
             )) |scan| {
                 assert(self.forest.scan_buffer_pool.scan_buffer_used > 0);
 
-                var scan_buffer: []Transfer = @alignCast(std.mem.bytesAsSlice(
+                var scan_buffer: []Transfer = std.mem.bytesAsSlice(
                     Transfer,
                     self.scan_lookup_buffer[0 .. @sizeOf(Transfer) *
                         constants.batch_max.query_transfers],
-                ));
+                );
                 assert(scan_buffer.len <= constants.batch_max.query_transfers);
 
                 var scan_lookup = self.scan_lookup.get(.transfers);
@@ -1520,10 +1518,10 @@ pub fn StateMachineType(
                 @sizeOf(Transfer),
             ) * @sizeOf(Transfer);
 
-            const scan_lookup_buffer: []Transfer = @alignCast(std.mem.bytesAsSlice(
+            const scan_lookup_buffer: []Transfer = std.mem.bytesAsSlice(
                 Transfer,
                 self.scan_lookup_buffer[0..scan_buffer_size],
-            ));
+            );
 
             const transfers_groove: *TransfersGroove = &self.forest.grooves.transfers;
             const scan = self.expire_pending_transfers.scan(
@@ -1564,10 +1562,10 @@ pub fn StateMachineType(
         }
 
         fn prefetch_expire_pending_transfers_accounts(self: *StateMachine) void {
-            const transfers: []const Transfer = @alignCast(std.mem.bytesAsSlice(
+            const transfers: []const Transfer = std.mem.bytesAsSlice(
                 Transfer,
                 self.scan_lookup_buffer[0 .. self.scan_lookup_result_count.? * @sizeOf(Transfer)],
-            ));
+            );
 
             const grooves = &self.forest.grooves;
             for (transfers) |expired| {
@@ -1919,10 +1917,7 @@ pub fn StateMachineType(
             output: []u8,
         ) usize {
             const batch: []const u128 = @alignCast(mem.bytesAsSlice(u128, input));
-            const results: []Account = @alignCast(mem.bytesAsSlice(
-                Account,
-                output,
-            ));
+            const results: []Account = @alignCast(mem.bytesAsSlice(Account, output));
             assert(results.len >= batch.len);
 
             var results_count: usize = 0;
@@ -1942,10 +1937,7 @@ pub fn StateMachineType(
             output: []u8,
         ) usize {
             const batch: []const u128 = @alignCast(mem.bytesAsSlice(u128, input));
-            const results: []Transfer = @alignCast(mem.bytesAsSlice(
-                Transfer,
-                output,
-            ));
+            const results: []Transfer = @alignCast(mem.bytesAsSlice(Transfer, output));
             assert(results.len >= batch.len);
 
             var results_count: usize = 0;
@@ -1996,12 +1988,10 @@ pub fn StateMachineType(
 
             const filter = account_filter_from_input(input);
 
-            const scan_results: []const AccountBalancesGrooveValue = @alignCast(
-                mem.bytesAsSlice(
-                    AccountBalancesGrooveValue,
-                    self.scan_lookup_buffer[0 .. self.scan_lookup_result_count.? *
-                        @sizeOf(AccountBalancesGrooveValue)],
-                ),
+            const scan_results: []const AccountBalancesGrooveValue = mem.bytesAsSlice(
+                AccountBalancesGrooveValue,
+                self.scan_lookup_buffer[0 .. self.scan_lookup_result_count.? *
+                    @sizeOf(AccountBalancesGrooveValue)],
             );
 
             const output_slice: []AccountBalance = @alignCast(mem.bytesAsSlice(
@@ -2857,10 +2847,10 @@ pub fn StateMachineType(
             defer self.scan_lookup_result_count = null;
             if (self.scan_lookup_result_count.? == 0) return 0;
 
-            const transfers: []const Transfer = @alignCast(std.mem.bytesAsSlice(
+            const transfers: []const Transfer = std.mem.bytesAsSlice(
                 Transfer,
                 self.scan_lookup_buffer[0 .. self.scan_lookup_result_count.? * @sizeOf(Transfer)],
-            ));
+            );
 
             log.debug("expire_pending_transfers: len={}", .{transfers.len});
 

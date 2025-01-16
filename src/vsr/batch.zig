@@ -111,7 +111,7 @@ pub const BatchDecoder = struct {
             return null;
         }
 
-        const batch_lenght = batch_lenght: {
+        const batch_length = batch_length: {
             assert(self.batch_events.len > 0);
             maybe(self.payload.len == 0);
 
@@ -121,22 +121,22 @@ pub const BatchDecoder = struct {
             assert(batch_event_count != std.math.maxInt(u16));
             maybe(batch_event_count == 0);
 
-            const batch_lenght = batch_event_count * self.element_size;
-            assert(batch_lenght <= self.payload.len);
-            assert(batch_lenght % self.element_size == 0); // Must be aligned.
+            const batch_length = batch_event_count * self.element_size;
+            assert(batch_length <= self.payload.len);
+            assert(batch_length % self.element_size == 0); // Must be aligned.
 
-            break :batch_lenght batch_lenght;
+            break :batch_length batch_length;
         };
 
         defer {
             self.batch_events = self.batch_events[0 .. self.batch_events.len - 1];
-            self.payload = if (self.payload.len > batch_lenght)
-                self.payload[batch_lenght..]
+            self.payload = if (self.payload.len > batch_length)
+                self.payload[batch_length..]
             else
                 &.{};
         }
 
-        return self.payload[0..batch_lenght];
+        return self.payload[0..batch_length];
     }
 };
 
@@ -167,6 +167,7 @@ pub const BatchEncoder = struct {
 
         const trailer_size = batch_trailer_total_size(.{
             .element_size = self.element_size,
+            // Takes into account extra trailer bytes that will need to be included.
             .batch_count = self.batch_count + 1,
         });
 
@@ -178,6 +179,7 @@ pub const BatchEncoder = struct {
     }
 
     pub fn can_add(self: *const BatchEncoder, bytes_written: usize) bool {
+        assert(constants.verify); // Used only by tests.
         return self.writable().len >= bytes_written;
     }
 

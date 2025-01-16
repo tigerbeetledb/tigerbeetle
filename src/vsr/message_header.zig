@@ -559,7 +559,7 @@ pub const Header = extern struct {
                             return "reconfigure: size != @sizeOf(Header)" ++
                                 " + @sizeOf(ReconfigurationRequest)";
                         }
-                        if (self.batch_count != 0) return "reconfigure: upgrade: batch_count != 0";
+                        if (self.batch_count != 0) return "reconfigure: batch_count != 0";
                     } else if (@intFromEnum(self.operation) < constants.vsr_operations_reserved) {
                         return "operation is reserved";
                     }

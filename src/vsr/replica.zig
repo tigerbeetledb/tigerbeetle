@@ -4190,7 +4190,7 @@ pub fn ReplicaType(
 
                     // If it's a batched request, the message body must be decoded to
                     // remove the trailer.
-                    // The `prefech` can process all batches at once.
+                    // The `prefetch` can process all batches at once.
                     const event_size = StateMachine.event_size_bytes(
                         prepare.header.release,
                         prepare_operation,

@@ -429,7 +429,7 @@ pub fn ContextType(
             self.pending.push(packet);
         }
 
-        /// Sends the packet (the entire batched liked list of packets) through the vsr client.
+        /// Sends the packet (the entire batched linked list of packets) through the vsr client.
         /// Always called by the io thread.
         fn packet_send(self: *Context, packet: *Packet) void {
             assert(self.batch_size_limit != null);
@@ -450,8 +450,10 @@ pub fn ContextType(
             };
 
             const message = self.client.get_message().build(.request);
-            // Don't need to release the message, since this function cannot fail/return early.
-            defer packet.assert_phase(.sent);
+            defer {
+                self.client.release_message(message.base());
+                packet.assert_phase(.sent);
+            }
 
             const bytes_written: usize = bytes_written: {
                 if (packet.batch_count == 0) {
@@ -512,8 +514,9 @@ pub fn ContextType(
                     .self = self,
                     .packet = packet,
                 }),
-                message,
+                message.ref(),
             );
+            assert(message.header.request != 0);
         }
 
         fn signal_notify_callback(signal: *Signal) void {
@@ -634,7 +637,12 @@ pub fn ContextType(
                     result_size,
                     reply,
                     batch_count,
-                ) catch unreachable;
+                ) catch std.debug.panic("client_result_callback: invalid batch: " ++
+                    "operation={s} reply.len={} batch_count={}", .{
+                    @tagName(operation),
+                    reply.len,
+                    batch_count,
+                });
 
                 var it: ?*Packet = packet;
                 while (it) |batched| {
