@@ -114,10 +114,6 @@ pub const FreeSet = struct {
     }) !FreeSet {
         assert(options.blocks_count % shard_bits == 0);
         assert(options.blocks_count % @bitSizeOf(Word) == 0);
-        assert(options.blocks_released_prior_checkpoint_durability_max > 0 or
-            constants.verify);
-        assert(options.blocks_released_prior_checkpoint_durability_max < options.blocks_count or
-            constants.verify);
 
         // Every block bit is covered by exactly one index bit.
         const shards_count = @divExact(options.blocks_count, shard_bits);
@@ -218,6 +214,7 @@ pub const FreeSet = struct {
 
     // A shortcut to initialize an empty free set for tests.
     pub fn init_empty(allocator: mem.Allocator, blocks_count: usize) !FreeSet {
+        comptime assert(constants.verify);
         var set = try init(allocator, .{
             .blocks_count = blocks_count,
             .blocks_released_prior_checkpoint_durability_max = 0,
@@ -231,6 +228,7 @@ pub const FreeSet = struct {
 
     // A shortcut to initialize and open an empty free set for tests.
     pub fn open_empty(allocator: mem.Allocator, blocks_count: usize) !FreeSet {
+        comptime assert(constants.verify);
         var set = try init(allocator, .{
             .blocks_count = blocks_count,
             .blocks_released_prior_checkpoint_durability_max = 0,
@@ -299,6 +297,23 @@ pub const FreeSet = struct {
         } else {
             // All blocks are free.
             assert(set.blocks_acquired.count() == 0);
+            return null;
+        }
+    }
+
+    /// Returns the address of the highest released block.
+    pub fn highest_address_released(set: FreeSet) ?u64 {
+        assert(set.opened);
+        var it = set.blocks_released.iterator(.{
+            .kind = .set,
+            .direction = .reverse,
+        });
+
+        if (it.next()) |block| {
+            const address = block + 1;
+            return address;
+        } else {
+            assert(set.count_released() == 0);
             return null;
         }
     }
@@ -469,6 +484,8 @@ pub const FreeSet = struct {
 
         // Block address must be acquired, but is not necessarily released.
         assert(set.blocks_acquired.isSet(block));
+        assert(!set.blocks_released.isSet(block) or
+            !set.blocks_released_prior_checkpoint_durability.contains(block));
         maybe(set.blocks_released.isSet(block));
         maybe(set.blocks_released_prior_checkpoint_durability.contains(block));
 
@@ -539,10 +556,13 @@ pub const FreeSet = struct {
     /// Given the address, marks an acquired block as free.
     fn free(set: *FreeSet, address: u64) void {
         assert(set.opened);
+        assert(set.checkpoint_durable);
 
         const block = address - 1;
         assert(set.blocks_acquired.isSet(block));
         assert(set.blocks_released.isSet(block));
+        assert(!set.blocks_released_prior_checkpoint_durability.contains(block));
+
         assert(set.reservation_count == 0);
         assert(set.reservation_blocks == 0);
 
@@ -582,8 +602,8 @@ pub const FreeSet = struct {
         }
         assert(set.blocks_released_prior_checkpoint_durability.count() == 0);
 
-        // Index verification is O(blocks.bit_length) so do it only at checkpoint, which is
-        // also linear.
+        // Index verification is O(blocks.bit_length) so do it only when checkpoint is marked
+        // durable, which is also linear (as we free released blocks in `blocks_released`).
         set.verify_index();
     }
 
@@ -637,6 +657,8 @@ pub const FreeSet = struct {
         for (0..set.index.bit_length) |shard| {
             if (set.find_free_block_in_shard(shard) == null) set.index.set(shard);
         }
+
+        set.verify_index();
     }
 
     /// Returns the maximum number of bytes that `blocks_count` blocks need to be encoded.

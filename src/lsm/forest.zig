@@ -773,15 +773,17 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                 half_bar_ops,
             );
 
-            // Maximum number of blocks released within a pipeline by LSM forest compactions.
-            var compaction_input_blocks_forest_max: usize = 0;
-            inline for (Forest.tree_infos) |tree_info| {
-                compaction_input_blocks_forest_max += (compaction_input_tables_max *
-                    (1 + tree_info.Tree.Table.layout.data_block_count_max));
-            }
-            const compaction_blocks_released_half_bar_max =
-                stdx.div_ceil(constants.lsm_levels, 2) *
-                compaction_input_blocks_forest_max;
+            // Maximum number of blocks released within a single half-bar by compaction.
+            const compaction_blocks_released_half_bar_max = blocks: {
+                var blocks: usize = 0;
+                inline for (Forest.tree_infos) |tree_info| {
+                    blocks +=
+                        stdx.div_ceil(constants.lsm_levels, 2) *
+                        (compaction_input_tables_max *
+                        (1 + tree_info.Tree.Table.layout.data_block_count_max));
+                }
+                break :blocks blocks;
+            };
 
             const compaction_blocks_released_pipeline_max =
                 (pipeline_half_bars * compaction_blocks_released_half_bar_max) +

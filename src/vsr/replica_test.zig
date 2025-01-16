@@ -1475,7 +1475,8 @@ test "Cluster: scrub: background scrubber, fully corrupt grid" {
             assert(b2_storage.area_faulty(.{ .grid = .{ .address = address } }));
         } else if (!a0_free_set.is_released(address)) {
             // Acquired (but not released) blocks are guaranteed to be repaired by the scrubber.
-            assert(!b2_free_set.is_free(address) and !b2_free_set.is_released(address));
+            assert(!b2_free_set.is_free(address));
+            assert(!b2_free_set.is_released(address));
             assert(!b2_storage.area_faulty(.{ .grid = .{ .address = address } }));
         } else {
             // Acquired (but released) blocks are not guaranteed to be repaired by the scrubber.

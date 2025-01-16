@@ -1096,7 +1096,7 @@ pub fn ReplicaType(
                 .blocks_released_prior_checkpoint_durability_max = Forest
                     .compaction_blocks_released_per_pipeline_max() +
                     Grid.free_set_checkpoints_blocks_max(self.superblock.storage_size_limit) +
-                    CheckpointTrailer.block_count_max(ClientSessions.encode_size),
+                    CheckpointTrailer.block_count_for_trailer_size(ClientSessions.encode_size),
             });
             errdefer self.grid.deinit(allocator);
 
@@ -3810,7 +3810,7 @@ pub fn ReplicaType(
             idle,
             /// Get the next prepare to commit from the journal or pipeline and...
             start,
-            /// ...if there isn't there, break out of commit loop.
+            /// ...if there isn't any, break out of commit loop.
             check_prepare,
             /// Load required data from LSM tree on disk into memory.
             prefetch,
@@ -3818,6 +3818,8 @@ pub fn ReplicaType(
             reply_setup,
             /// Execute state machine logic.
             execute,
+            /// Every vsr_checkpoint_ops, mark the current checkpoint as durable.
+            checkpoint_durable,
             /// Run one beat of LSM compaction.
             compact,
             /// Every vsr_checkpoint_ops, persist the current state to disk and...
@@ -3910,12 +3912,22 @@ pub fn ReplicaType(
 
                 if (self.commit_stage == .execute) {
                     self.trace.stop(.replica_commit, .{ .stage = @tagName(self.commit_stage) });
-                    self.commit_stage = .compact;
+                    self.commit_stage = .checkpoint_durable;
                     self.trace.start(.replica_commit, .{
                         .stage = @tagName(self.commit_stage),
                         .op = self.commit_prepare.?.header.op,
                     });
 
+                    if (self.commit_checkpoint_durable() == .pending) return;
+                }
+
+                if (self.commit_stage == .checkpoint_durable) {
+                    self.trace.stop(.replica_commit, .{ .stage = @tagName(self.commit_stage) });
+                    self.commit_stage = .compact;
+                    self.trace.start(.replica_commit, .{
+                        .stage = @tagName(self.commit_stage),
+                        .op = self.commit_prepare.?.header.op,
+                    });
                     if (self.commit_compact() == .pending) return;
                 }
 
@@ -4272,10 +4284,34 @@ pub fn ReplicaType(
 
         fn commit_compact(self: *Replica) enum { pending } {
             assert(self.commit_stage == .compact);
-            if (!self.grid.free_set.checkpoint_durable and vsr.Checkpoint.durable(
-                self.op_checkpoint(),
-                self.commit_min,
-            )) {
+            self.state_machine.compact(commit_compact_callback, self.commit_prepare.?.header.op);
+            return .pending;
+        }
+
+        fn commit_checkpoint_durable_grid_callback(grid: *Grid) void {
+            const self: *Replica = @alignCast(@fieldParentPtr("grid", grid));
+            assert(self.commit_stage == .checkpoint_durable);
+            assert(self.grid.free_set.checkpoint_durable);
+            assert(vsr.Checkpoint.durable(self.op_checkpoint(), self.commit_min));
+            self.commit_dispatch_resume();
+        }
+
+        fn commit_compact_callback(state_machine: *StateMachine) void {
+            const self: *Replica = @alignCast(@fieldParentPtr("state_machine", state_machine));
+            assert(self.commit_stage == .compact);
+            assert(self.op_checkpoint() == self.superblock.staging.vsr_state.checkpoint.header.op);
+            assert(self.op_checkpoint() == self.superblock.working.vsr_state.checkpoint.header.op);
+
+            if (self.event_callback) |hook| hook(self, .compaction_completed);
+            return self.commit_dispatch_resume();
+        }
+
+        fn commit_checkpoint_durable(self: *Replica) enum { ready, pending } {
+            assert(self.commit_stage == .checkpoint_durable);
+
+            if (!self.grid.free_set.checkpoint_durable and
+                vsr.Checkpoint.durable(self.op_checkpoint(), self.commit_min))
+            {
                 // Checkpoint is guaranteed to be durable on a commit quorum when a replica is
                 // committing the (pipeline + 1)ᵗʰ prepare after checkpoint trigger. It might
                 // already be durable before this point (some part of the cluster may be lagging
@@ -4287,36 +4323,10 @@ pub fn ReplicaType(
 
                 self.grid_scrubber.checkpoint_durable();
                 self.grid.checkpoint_durable(commit_checkpoint_durable_grid_callback);
+                return .pending;
             } else {
-                self.state_machine.compact(
-                    commit_compact_callback,
-                    self.commit_prepare.?.header.op,
-                );
+                return .ready;
             }
-
-            return .pending;
-        }
-
-        fn commit_checkpoint_durable_grid_callback(grid: *Grid) void {
-            const self: *Replica = @alignCast(@fieldParentPtr("grid", grid));
-            assert(self.commit_stage == .compact);
-            assert(self.grid.free_set.checkpoint_durable);
-            assert(vsr.Checkpoint.durable(self.op_checkpoint(), self.commit_min));
-
-            self.state_machine.compact(
-                commit_compact_callback,
-                self.commit_prepare.?.header.op,
-            );
-        }
-
-        fn commit_compact_callback(state_machine: *StateMachine) void {
-            const self: *Replica = @alignCast(@fieldParentPtr("state_machine", state_machine));
-            assert(self.commit_stage == .compact);
-            assert(self.op_checkpoint() == self.superblock.staging.vsr_state.checkpoint.header.op);
-            assert(self.op_checkpoint() == self.superblock.working.vsr_state.checkpoint.header.op);
-
-            if (self.event_callback) |hook| hook(self, .compaction_completed);
-            return self.commit_dispatch_resume();
         }
 
         fn commit_checkpoint_data(self: *Replica) enum { ready, pending } {
@@ -4333,8 +4343,8 @@ pub fn ReplicaType(
             assert(op <= self.op);
             assert((op + 1) % constants.lsm_compaction_ops == 0);
             log.info("{}: commit_checkpoint_data: checkpoint_data start " ++
-                "(op={} current_checkpoint={} next_checkpoint={} free_set.acquired={} " ++
-                "free_set.released={}", .{
+                "(op={} current_checkpoint={} next_checkpoint={} " ++
+                "free_set.acquired={} free_set.released={})", .{
                 self.replica,
                 self.op,
                 self.op_checkpoint(),
@@ -4598,7 +4608,7 @@ pub fn ReplicaType(
                 self.grid.free_set_checkpoint_blocks_released.block_count() +
                 self.client_sessions_checkpoint.block_count());
 
-            // Send prepare_oks that may have been wittheld by virtue of `op_prepare_ok_max`.
+            // Send prepare_oks that may have been withheld by virtue of `op_prepare_ok_max`.
             self.send_prepare_oks_after_checkpoint();
 
             if (self.event_callback) |hook| hook(self, .checkpoint_completed);
@@ -9289,6 +9299,7 @@ pub fn ReplicaType(
                 .idle, // (StateMachine.open() may be running.)
                 .prefetch,
                 .compact,
+                .checkpoint_durable,
                 => self.sync_dispatch(.canceling_grid),
             }
         }

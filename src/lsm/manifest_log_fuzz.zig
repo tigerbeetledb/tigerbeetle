@@ -25,10 +25,11 @@ const schema = @import("./schema.zig");
 const compaction_tables_input_max = @import("./compaction.zig").compaction_tables_input_max;
 const TableInfo = schema.ManifestNode.TableInfo;
 
+const tree_count = 20;
 const manifest_log_compaction_pace = ManifestLogPace.init(.{
     // Use many trees so that we fill manifest blocks quickly.
     // (This makes it easier to hit "worst case" scenarios in manifest compaction pacing.)
-    .tree_count = 20,
+    .tree_count = tree_count,
     // Use a artificially low table-count-max so that we can easily fill the manifest log and verify
     // that pacing is correct.
     .tables_max = schema.ManifestNode.entry_count_max * 100,
@@ -156,7 +157,7 @@ fn generate_events(
         // All of the trees we are inserting/modifying have the same id (for simplicity), but we
         // want to perform more updates if there are more trees, to better simulate a real state
         // machine.
-        for (0..20) |_| {
+        for (0..tree_count) |_| {
             const operations: struct {
                 update_levels: usize,
                 update_snapshots: usize,

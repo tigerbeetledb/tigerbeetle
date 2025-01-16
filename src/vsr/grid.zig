@@ -369,8 +369,9 @@ pub fn GridType(comptime Storage: type) type {
         ///   4. Write the free set blocks to disk.
         ///   5. Mark the free set's own blocks as released (but not yet free).
         ///
-        /// This function handles step 1, and calls `CheckpointTrailer.checkpoint`, which handles
-        /// 2-5.
+        /// This function handles step 1, and calls CheckpointTrailer.checkpoint, which handles
+        /// 2-4.
+        /// The caller is responsible for calling Grid.mark_checkpoint_not_durable, which handles 5.
         pub fn checkpoint(grid: *Grid, callback: *const fn (*Grid) void) void {
             assert(grid.callback == .none);
             assert(grid.read_global_queue.empty());
@@ -451,10 +452,9 @@ pub fn GridType(comptime Storage: type) type {
                 .block_addresses[0..grid.free_set_checkpoint_blocks_released.block_count()]);
         }
 
-        ///   Now that the checkpoint is durable on a commit quorum of replicas:
-        ///   1. Await all pending repair-writes to blocks that were just freed. This guarantees
-        ///      that there are no outstanding writes to (now-)free blocks.
-        ///   2. Mark currently released blocks as free and eligible for acquisition.
+        /// Now that the checkpoint is durable on a commit quorum of replicas:
+        /// 1. Await all pending repair-writes to blocks that are about to be freed.
+        /// 2. Mark currently released blocks as free and eligible for acquisition.
         ///
         /// This function handles step 1.
         /// The caller is responsible for calling FreeSet.checkpoint which handles 2.
@@ -1326,7 +1326,7 @@ pub fn GridType(comptime Storage: type) type {
         pub fn free_set_checkpoints_blocks_max(storage_size_limit: u64) usize {
             const block_count = vsr.block_count_max(storage_size_limit);
             const free_set_encoded_size = FreeSet.encode_size_max(block_count);
-            return 2 * CheckpointTrailer.block_count_max(free_set_encoded_size);
+            return 2 * CheckpointTrailer.block_count_for_trailer_size(free_set_encoded_size);
         }
 
         fn block_offset(address: u64) u64 {
