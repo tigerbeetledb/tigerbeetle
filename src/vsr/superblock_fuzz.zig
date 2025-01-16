@@ -447,17 +447,20 @@ const Environment = struct {
                 .block_count = 0,
             },
             .view_attributes = null,
-            .free_set_references = .{ .blocks_acquired = .{
-                .last_block_checksum = 0,
-                .last_block_address = 0,
-                .trailer_size = 0,
-                .checksum = vsr.checksum(&.{}),
-            }, .blocks_released = .{
-                .last_block_checksum = 0,
-                .last_block_address = 0,
-                .trailer_size = 0,
-                .checksum = vsr.checksum(&.{}),
-            } },
+            .free_set_references = .{
+                .blocks_acquired = .{
+                    .last_block_checksum = 0,
+                    .last_block_address = 0,
+                    .trailer_size = 0,
+                    .checksum = vsr.checksum(&.{}),
+                },
+                .blocks_released = .{
+                    .last_block_checksum = 0,
+                    .last_block_address = 0,
+                    .trailer_size = 0,
+                    .checksum = vsr.checksum(&.{}),
+                },
+            },
             .client_sessions_reference = .{
                 .last_block_checksum = 0,
                 .last_block_address = 0,

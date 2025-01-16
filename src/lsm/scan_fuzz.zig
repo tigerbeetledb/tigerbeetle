@@ -786,11 +786,11 @@ const Environment = struct {
         env.superblock.open(superblock_open_callback, &env.superblock_context);
         try env.tick_until_state_change(.superblock_open, .free_set_open);
 
-        // The fuzzer runs in a single process, all checkpoints are trivially durable.
-        env.grid.free_set.checkpoint_durable = true;
-
         env.grid.open(grid_open_callback);
         try env.tick_until_state_change(.free_set_open, .forest_init);
+
+        // The fuzzer runs in a single process, all checkpoints are trivially durable.
+        env.grid.free_set.checkpoint_durable = true;
 
         try env.forest.init(allocator, &env.grid, .{
             .compaction_block_count = Forest.Options.compaction_block_count_min,
@@ -859,7 +859,9 @@ const Environment = struct {
             });
             try env.tick_until_state_change(.superblock_checkpoint, .fuzzing);
 
-            env.grid.free_set.free_released_blocks();
+            // The fuzzer runs in a single process, all checkpoints are trivially durable.
+            env.grid.free_set.mark_checkpoint_not_durable();
+            env.grid.free_set.mark_checkpoint_durable();
 
             env.checkpoint_op = null;
         }

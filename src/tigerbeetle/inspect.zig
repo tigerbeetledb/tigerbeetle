@@ -562,7 +562,7 @@ const Inspector = struct {
         inspector: *Inspector,
         output: std.io.AnyWriter,
         superblock: *const SuperBlockHeader,
-        bitset: vsr.FreeSet.BitsetKinds,
+        bitset: vsr.FreeSet.BitsetKind,
         free_set_buffer: []align(@alignOf(vsr.FreeSet.Word)) u8,
         free_set_addresses: *std.ArrayList(u64),
     ) !void {
@@ -699,7 +699,7 @@ const Inspector = struct {
                 .blocks_acquired = &.{free_set_blocks_acquired_buffer},
                 .blocks_released = &.{free_set_blocks_released_buffer},
             },
-            .block_addresses = .{
+            .free_set_block_addresses = .{
                 .blocks_acquired = free_set_blocks_acquired_addresses.items,
                 .blocks_released = free_set_blocks_released_addresses.items,
             },

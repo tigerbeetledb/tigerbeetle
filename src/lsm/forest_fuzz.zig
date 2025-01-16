@@ -317,7 +317,10 @@ const Environment = struct {
         });
         try env.tick_until_state_change(.superblock_checkpoint, .fuzzing);
 
-        env.grid.free_set.free_released_blocks();
+        // The fuzzer runs in a single process, all checkpoints are trivially durable.
+        env.grid.free_set.mark_checkpoint_not_durable();
+        env.grid.free_set.mark_checkpoint_durable();
+
         env.checkpoint_op = null;
     }
 

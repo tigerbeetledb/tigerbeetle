@@ -10,7 +10,6 @@ const stdx = @import("../stdx.zig");
 const StaticAllocator = @import("../static_allocator.zig");
 const allocate_block = @import("grid.zig").allocate_block;
 const GridType = @import("grid.zig").GridType;
-const FreeSet = @import("./free_set.zig").FreeSet;
 const BlockPtr = @import("grid.zig").BlockPtr;
 const IOPSType = @import("../iops.zig").IOPSType;
 const MessagePool = @import("../message_pool.zig").MessagePool;
@@ -22,7 +21,6 @@ const TestStorage = @import("../testing/storage.zig").Storage;
 const marks = @import("../testing/marks.zig");
 
 const vsr = @import("../vsr.zig");
-const compaction_input_tables_max = @import("../lsm/compaction.zig").compaction_tables_input_max;
 const Header = vsr.Header;
 const Timeout = vsr.Timeout;
 const Command = vsr.Command;
@@ -1095,8 +1093,11 @@ pub fn ReplicaType(
                 .cache_blocks_count = options.grid_cache_blocks_count,
                 .missing_blocks_max = constants.grid_missing_blocks_max,
                 .missing_tables_max = constants.grid_missing_tables_max,
-                .blocks_released_prior_checkpoint_durability_max = self
-                    .blocks_released_prior_checkpoint_durability_max(),
+                .blocks_released_prior_checkpoint_durability_max = vsr
+                    .blocks_released_prior_checkpoint_durability_max(
+                    self.superblock.storage_size_limit,
+                    Forest,
+                ),
             });
             errdefer self.grid.deinit(allocator);
 
@@ -10196,56 +10197,6 @@ pub fn ReplicaType(
             assert((self.grid.free_set.count_acquired() - self.grid.free_set.count_released()) ==
                 (tables_index_block_count + tables_value_block_count +
                 self.state_machine.forest.manifest_log.log_block_checksums.count));
-        }
-
-        /// Calculates the maximum number of blocks that could be released before a checkpoint
-        /// becomes durable on a commit quorum of replicas.
-        ///
-        /// A checkpoint is guaranteed to be durable when a replica commits the (pipeline + 1)th
-        /// prepare after checkpoint trigger (see `op_repair_min` for more details). Therefore,
-        /// the maximum number of blocks released prior checkpoint durability is equivalent
-        /// to the maximum number of blocks released by the first pipeline of prepares after
-        /// checkpoint trigger. This includes blocks released by:
-        /// 1. Forest compaction
-        /// 2. ManifestLog compaction
-        /// 3. ClientSessions checkpoint
-        /// 4. FreeSet checkpoint
-        fn blocks_released_prior_checkpoint_durability_max(self: *const Replica) usize {
-            const half_bar_ops = @divExact(constants.lsm_compaction_ops, 2);
-            const pipeline_half_bars =
-                stdx.div_ceil(constants.pipeline_prepare_queue_max, half_bar_ops);
-
-            // Maximum number of blocks released within a pipeline by LSM forest compactions.
-            var compaction_input_blocks_forest_max: u32 = 0;
-            inline for (Forest.tree_infos) |tree_info| {
-                const tree_id = comptime Forest.tree_id_cast(tree_info.tree_id);
-                const tree = self.state_machine.forest.tree_for_id_const(tree_id);
-                compaction_input_blocks_forest_max +=
-                    compaction_input_tables_max * (1 + tree.data_block_count_max());
-            }
-            const compaction_blocks_released_half_bar_max =
-                stdx.div_ceil(constants.lsm_levels, 2) *
-                compaction_input_blocks_forest_max;
-
-            const compaction_blocks_released_pipeline_max =
-                (pipeline_half_bars * compaction_blocks_released_half_bar_max) +
-                // Compaction is paced across all beats, so if a pipeline is less than half a bar,
-                // for simplicity, use the upper bound for a half a bar (treating pacing as
-                // imperfect).
-                @intFromBool(pipeline_half_bars == 0) * compaction_blocks_released_half_bar_max;
-
-            // Maximum number of blocks released within a pipeline by ManifestLog compactions.
-            const manifest_log_blocks_released_pipeline_max =
-                pipeline_half_bars * Forest.manifest_log_blocks_released_half_bar_max;
-
-            const block_count_max_grid = Grid.block_count_max(&self.superblock);
-
-            return compaction_blocks_released_pipeline_max +
-                manifest_log_blocks_released_pipeline_max +
-                CheckpointTrailer.block_count_max(ClientSessions.encode_size) +
-                // We checkpoint both `blocks_acquired` and `blocks_released` bitsets in FreeSet.
-                CheckpointTrailer.block_count_max(FreeSet.encode_size_max(block_count_max_grid)) +
-                CheckpointTrailer.block_count_max(FreeSet.encode_size_max(block_count_max_grid));
         }
     };
 }

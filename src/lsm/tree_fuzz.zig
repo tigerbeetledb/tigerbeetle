@@ -245,10 +245,10 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
             env.tick_until_state_change(.superblock_open, .free_set_open);
             env.grid.open(grid_open_callback);
 
+            env.tick_until_state_change(.free_set_open, .tree_init);
+
             // The fuzzer runs in a single process, all checkpoints are trivially durable.
             env.grid.free_set.checkpoint_durable = true;
-
-            env.tick_until_state_change(.free_set_open, .tree_init);
 
             try env.tree.init(allocator, &env.node_pool, &env.grid, .{
                 .id = 1,
@@ -422,7 +422,9 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
 
             env.tick_until_state_change(.superblock_checkpoint, .fuzzing);
 
-            env.grid.free_set.free_released_blocks();
+            // The fuzzer runs in a single process, all checkpoints are trivially durable.
+            env.grid.free_set.mark_checkpoint_not_durable();
+            env.grid.free_set.mark_checkpoint_durable();
         }
 
         fn grid_checkpoint_callback(grid: *Grid) void {

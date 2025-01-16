@@ -94,7 +94,10 @@ fn run_fuzz(
                 }
                 active_reservations.clearRetainingCapacity();
 
-                free_set.free_released_blocks();
+                // The fuzzer runs in a single process, all checkpoints are trivially durable.
+                free_set.mark_checkpoint_durable();
+                free_set.mark_checkpoint_not_durable();
+
                 free_set_model.checkpoint();
             },
         }

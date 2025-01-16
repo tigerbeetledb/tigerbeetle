@@ -43,7 +43,7 @@ pub const Quorums = @import("superblock_quorums.zig").QuorumsType(.{
 
 pub const SuperBlockVersion: u16 =
     // Make sure that data files created by development builds are distinguished through version.
-    if (constants.config.process.release.value == vsr.Release.minimum.value) 1 else 2;
+    if (constants.config.process.release.value == vsr.Release.minimum.value) 0 else 2;
 
 const vsr_headers_reserved_size = constants.sector_size -
     ((constants.view_change_headers_max * @sizeOf(vsr.Header)) % constants.sector_size);
@@ -573,7 +573,7 @@ pub const SuperBlockHeader = extern struct {
 
     pub fn free_set_reference(
         superblock: *const SuperBlockHeader,
-        bitset: vsr.FreeSet.BitsetKinds,
+        bitset: vsr.FreeSet.BitsetKind,
     ) TrailerReference {
         switch (bitset) {
             .blocks_acquired => {

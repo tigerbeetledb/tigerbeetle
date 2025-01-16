@@ -515,7 +515,9 @@ const Environment = struct {
         );
         env.wait(&env.manifest_log);
 
-        env.grid.free_set.free_released_blocks();
+        // The fuzzer runs in a single process, all checkpoints are trivially durable.
+        env.grid.free_set.mark_checkpoint_not_durable();
+        env.grid.free_set.mark_checkpoint_durable();
 
         try env.verify();
     }

@@ -222,18 +222,13 @@ pub fn GridType(comptime Storage: type) type {
             });
             errdefer free_set.deinit(allocator);
 
-            var free_set_checkpoint_blocks_acquired = try CheckpointTrailer.init(
-                allocator,
-                .free_set,
-                FreeSet.encode_size_max(blocks_count),
-            );
+            const free_set_encoded_size_max = FreeSet.encode_size_max(blocks_count);
+            var free_set_checkpoint_blocks_acquired =
+                try CheckpointTrailer.init(allocator, .free_set, free_set_encoded_size_max);
             errdefer free_set_checkpoint_blocks_acquired.deinit(allocator);
 
-            var free_set_checkpoint_blocks_released = try CheckpointTrailer.init(
-                allocator,
-                .free_set,
-                FreeSet.encode_size_max(blocks_count),
-            );
+            var free_set_checkpoint_blocks_released =
+                try CheckpointTrailer.init(allocator, .free_set, free_set_encoded_size_max);
             errdefer free_set_checkpoint_blocks_released.deinit(allocator);
 
             var blocks_missing = try GridBlocksMissing.init(allocator, .{
@@ -321,6 +316,9 @@ pub fn GridType(comptime Storage: type) type {
         }
 
         fn open_free_set_callback(grid: *Grid) void {
+            assert(grid.free_set_checkpoint_blocks_acquired.callback == .none or
+                grid.free_set_checkpoint_blocks_released.callback == .none);
+
             const callback = grid.callback.open;
             // May still be reading the CheckpointTrailer for `blocks_acquired`.
             if (grid.free_set_checkpoint_blocks_acquired.callback == .open) return;
@@ -343,7 +341,7 @@ pub fn GridType(comptime Storage: type) type {
                         .blocks_acquired = grid.free_set_checkpoint_blocks_acquired.decode_chunks(),
                         .blocks_released = grid.free_set_checkpoint_blocks_released.decode_chunks(),
                     },
-                    .block_addresses = .{
+                    .free_set_block_addresses = .{
                         .blocks_acquired = grid.free_set_checkpoint_blocks_acquired
                             .block_addresses[0..block_count_encoded_blocks_acquired],
                         .blocks_released = grid.free_set_checkpoint_blocks_released
@@ -352,6 +350,12 @@ pub fn GridType(comptime Storage: type) type {
                 });
                 assert((grid.free_set.count_acquired() > 0) ==
                     (grid.free_set_checkpoint_blocks_acquired.size > 0));
+                assert((grid.free_set.count_released() > 0) ==
+                    (grid.free_set_checkpoint_blocks_released.size > 0));
+                assert(grid.free_set.count_released() >=
+                    (grid.free_set_checkpoint_blocks_acquired.block_count() +
+                    grid.free_set_checkpoint_blocks_released.block_count()));
+
                 assert(grid.free_set.count_reservations() == 0);
             }
             grid.callback = .none;
@@ -473,7 +477,6 @@ pub fn GridType(comptime Storage: type) type {
             // and also mark the checkpoint as durable.
             assert(!grid.free_set.checkpoint_durable);
             defer assert(grid.free_set.checkpoint_durable);
-            grid.free_set.free_released_blocks();
             grid.free_set.mark_checkpoint_durable();
 
             const callback = grid.callback.checkpoint_durable;
