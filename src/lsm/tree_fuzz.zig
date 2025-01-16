@@ -170,7 +170,10 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
                 .trace = &env.trace,
                 .missing_blocks_max = 0,
                 .missing_tables_max = 0,
-                .blocks_released_prior_checkpoint_durability_max = 0,
+                // Grid.mark_checkpoint_not_durable releases the FreeSet checkpoints blocks into
+                // FreeSet.blocks_released_prior_checkpoint_durability.
+                .blocks_released_prior_checkpoint_durability_max = Grid
+                    .free_set_checkpoints_blocks_max(constants.storage_size_limit_default),
             });
             defer env.grid.deinit(allocator);
 
@@ -240,15 +243,13 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
             env.tick_until_state_change(.superblock_format, .superblock_open);
             env.superblock.open(superblock_open_callback, &env.superblock_context);
 
-            // The fuzzer runs in a single process, all checkpoints can be immediately marked
-            // durable.
             env.tick_until_state_change(.superblock_open, .free_set_open);
             env.grid.open(grid_open_callback);
 
             env.tick_until_state_change(.free_set_open, .tree_init);
 
-            // The fuzzer runs in a single process, all checkpoints are trivially durable.
-            env.grid.free_set.checkpoint_durable = true;
+            // The first checkpoint is trivially durable.
+            env.grid.free_set.mark_checkpoint_durable();
 
             try env.tree.init(allocator, &env.node_pool, &env.grid, .{
                 .id = 1,
@@ -422,8 +423,10 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
 
             env.tick_until_state_change(.superblock_checkpoint, .fuzzing);
 
-            // The fuzzer runs in a single process, all checkpoints are trivially durable.
-            env.grid.free_set.mark_checkpoint_not_durable();
+            // The fuzzer runs in a single process, all checkpoints are trivially durable. Use
+            // free_set.mark_checkpoint_durable() instead of grid.mark_checkpoint_durable(); the
+            // latter requires passing a callback, which is called synchronously in fuzzers anyway.
+            env.grid.mark_checkpoint_not_durable();
             env.grid.free_set.mark_checkpoint_durable();
         }
 

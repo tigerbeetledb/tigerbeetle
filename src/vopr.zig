@@ -47,7 +47,7 @@ pub const output = std.log.scoped(.cluster);
 const log = std.log.scoped(.simulator);
 
 pub const std_options = .{
-    // The -Dsimulator-log=<full|short> build option selects two logging modes.
+    // The -vopr-log=<full|short> build option selects two logging modes.
     // In "short" mode, only state transitions are printed (see `Cluster.log_replica`).
     // "full" mode is the usual logging according to the level.
     .log_level = if (vsr_vopr_options.log == .short) .info else .debug,

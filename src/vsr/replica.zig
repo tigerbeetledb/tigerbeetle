@@ -1093,11 +1093,10 @@ pub fn ReplicaType(
                 .cache_blocks_count = options.grid_cache_blocks_count,
                 .missing_blocks_max = constants.grid_missing_blocks_max,
                 .missing_tables_max = constants.grid_missing_tables_max,
-                .blocks_released_prior_checkpoint_durability_max = vsr
-                    .blocks_released_prior_checkpoint_durability_max(
-                    self.superblock.storage_size_limit,
-                    Forest,
-                ),
+                .blocks_released_prior_checkpoint_durability_max = Forest
+                    .compaction_blocks_released_per_pipeline_max() +
+                    Grid.free_set_checkpoints_blocks_max(self.superblock.storage_size_limit) +
+                    CheckpointTrailer.block_count_max(ClientSessions.encode_size),
             });
             errdefer self.grid.deinit(allocator);
 
@@ -4589,17 +4588,10 @@ pub fn ReplicaType(
 
             // Mark the current checkpoint as not durable, then release the blocks acquired for the
             // ClientSessions and FreeSet checkpoints (to be freed when the *next* checkpoint
-            // becomes durable). The ordering is important here, if we were to release these blocks
-            // before the checkpoint is marked as not durable, they would erroneously be freed when
-            // the *current* checkpoint becomes durable.
-            self.grid.free_set.mark_checkpoint_not_durable();
-
+            // becomes durable).
+            self.grid.mark_checkpoint_not_durable();
             self.grid.release(self.client_sessions_checkpoint
                 .block_addresses[0..self.client_sessions_checkpoint.block_count()]);
-            self.grid.release(self.grid.free_set_checkpoint_blocks_acquired
-                .block_addresses[0..self.grid.free_set_checkpoint_blocks_acquired.block_count()]);
-            self.grid.release(self.grid.free_set_checkpoint_blocks_released
-                .block_addresses[0..self.grid.free_set_checkpoint_blocks_released.block_count()]);
 
             assert(self.grid.free_set.count_released() >=
                 self.grid.free_set_checkpoint_blocks_acquired.block_count() +

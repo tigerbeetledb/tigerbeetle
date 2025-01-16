@@ -532,7 +532,10 @@ const Environment = struct {
                 .trace = &env.trace,
                 .missing_blocks_max = 0,
                 .missing_tables_max = 0,
-                .blocks_released_prior_checkpoint_durability_max = 0,
+                // Grid.mark_checkpoint_not_durable releases the FreeSet checkpoints blocks into
+                // FreeSet.blocks_released_prior_checkpoint_durability.
+                .blocks_released_prior_checkpoint_durability_max = Grid
+                    .free_set_checkpoints_blocks_max(constants.storage_size_limit_default),
             }),
             .forest = undefined,
             .model = .{},
@@ -789,8 +792,8 @@ const Environment = struct {
         env.grid.open(grid_open_callback);
         try env.tick_until_state_change(.free_set_open, .forest_init);
 
-        // The fuzzer runs in a single process, all checkpoints are trivially durable.
-        env.grid.free_set.checkpoint_durable = true;
+        // The first checkpoint is trivially durable.
+        env.grid.free_set.mark_checkpoint_durable();
 
         try env.forest.init(allocator, &env.grid, .{
             .compaction_block_count = Forest.Options.compaction_block_count_min,
@@ -859,8 +862,10 @@ const Environment = struct {
             });
             try env.tick_until_state_change(.superblock_checkpoint, .fuzzing);
 
-            // The fuzzer runs in a single process, all checkpoints are trivially durable.
-            env.grid.free_set.mark_checkpoint_not_durable();
+            // The fuzzer runs in a single process, all checkpoints are trivially durable. Use
+            // free_set.mark_checkpoint_durable() instead of grid.mark_checkpoint_durable(); the
+            // latter requires passing a callback, which is called synchronously in fuzzers anyway.
+            env.grid.mark_checkpoint_not_durable();
             env.grid.free_set.mark_checkpoint_durable();
 
             env.checkpoint_op = null;

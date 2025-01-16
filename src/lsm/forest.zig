@@ -20,6 +20,7 @@ const snapshot_min_for_table_output = @import("compaction.zig").snapshot_min_for
 const compaction_op_min = @import("compaction.zig").compaction_op_min;
 const compaction_block_count_bar_max = @import("compaction.zig").compaction_block_count_bar_max;
 const compaction_block_count_beat_min = @import("compaction.zig").compaction_block_count_beat_min;
+const compaction_input_tables_max = @import("compaction.zig").compaction_tables_input_max;
 
 /// The maximum number of tables for the forest as a whole. This is set a bit backwards due to how
 /// the code is structured: a single tree should be able to use all the tables in the forest, so the
@@ -754,6 +755,47 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                 assert(table_removed);
             }
             assert(tables_latest.count() == 0);
+        }
+
+        /// Calculates the maximum number of blocks that could be released by Tree and ManifestLog
+        /// compactions before a checkpoint becomes durable on a commit quorum of replicas.
+        ///
+        /// A checkpoint is guaranteed to be durable when a replica commits the (pipeline + 1)th
+        /// prepare after checkpoint trigger (see `op_repair_min` in replica.zig for more details).
+        /// Therefore, the maximum number of blocks released prior checkpoint durability is
+        /// equivalent to the maximum number of blocks released by the first pipeline of prepares
+        /// after checkpoint trigger.
+        pub fn compaction_blocks_released_per_pipeline_max() usize {
+            const half_bar_ops = @divExact(constants.lsm_compaction_ops, 2);
+            const pipeline_half_bars =
+                stdx.div_ceil(
+                constants.pipeline_prepare_queue_max,
+                half_bar_ops,
+            );
+
+            // Maximum number of blocks released within a pipeline by LSM forest compactions.
+            var compaction_input_blocks_forest_max: usize = 0;
+            inline for (Forest.tree_infos) |tree_info| {
+                compaction_input_blocks_forest_max += (compaction_input_tables_max *
+                    (1 + tree_info.Tree.Table.layout.data_block_count_max));
+            }
+            const compaction_blocks_released_half_bar_max =
+                stdx.div_ceil(constants.lsm_levels, 2) *
+                compaction_input_blocks_forest_max;
+
+            const compaction_blocks_released_pipeline_max =
+                (pipeline_half_bars * compaction_blocks_released_half_bar_max) +
+                // Compaction is paced across all beats, so if a pipeline is less than half a bar,
+                // for simplicity, use the upper bound for a half a bar (treating pacing as
+                // imperfect).
+                @intFromBool(pipeline_half_bars == 0) * compaction_blocks_released_half_bar_max;
+
+            // Maximum number of blocks released within a pipeline by ManifestLog compactions.
+            const manifest_log_blocks_released_pipeline_max =
+                pipeline_half_bars * Forest.manifest_log_blocks_released_half_bar_max;
+
+            return compaction_blocks_released_pipeline_max +
+                manifest_log_blocks_released_pipeline_max;
         }
     };
 }

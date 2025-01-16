@@ -214,7 +214,7 @@ pub fn GridType(comptime Storage: type) type {
             missing_tables_max: usize,
             blocks_released_prior_checkpoint_durability_max: usize,
         }) !Grid {
-            const blocks_count = Grid.block_count_max(options.superblock);
+            const blocks_count = vsr.block_count_max(options.superblock.storage_size_limit);
             var free_set = try FreeSet.init(allocator, .{
                 .blocks_count = blocks_count,
                 .blocks_released_prior_checkpoint_durability_max = options
@@ -432,6 +432,23 @@ pub fn GridType(comptime Storage: type) type {
             const callback = grid.callback.checkpoint;
             grid.callback = .none;
             callback(grid);
+        }
+
+        /// Mark the current checkpoint as not durable, then release the blocks acquired for the
+        /// FreeSet checkpoints (to be freed when the *next* checkpoint becomes durable).
+        ///
+        /// The ordering is important here, if we were to release these blocks before the checkpoint
+        /// is marked as not durable, they would erroneously be freed when the *current* checkpoint
+        /// becomes durable.
+        pub fn mark_checkpoint_not_durable(grid: *Grid) void {
+            assert(grid.free_set.checkpoint_durable);
+            defer assert(!grid.free_set.checkpoint_durable);
+
+            grid.free_set.mark_checkpoint_not_durable();
+            grid.release(grid.free_set_checkpoint_blocks_acquired
+                .block_addresses[0..grid.free_set_checkpoint_blocks_acquired.block_count()]);
+            grid.release(grid.free_set_checkpoint_blocks_released
+                .block_addresses[0..grid.free_set_checkpoint_blocks_released.block_count()]);
         }
 
         ///   Now that the checkpoint is durable on a commit quorum of replicas:
@@ -1306,12 +1323,10 @@ pub fn GridType(comptime Storage: type) type {
             }
         }
 
-        pub fn block_count_max(superblock: *const SuperBlock) usize {
-            const shard_count_limit: usize = @intCast(@divFloor(
-                superblock.storage_size_limit - vsr.superblock.data_file_size_min,
-                constants.block_size * FreeSet.shard_bits,
-            ));
-            return shard_count_limit * FreeSet.shard_bits;
+        pub fn free_set_checkpoints_blocks_max(storage_size_limit: u64) usize {
+            const block_count = vsr.block_count_max(storage_size_limit);
+            const free_set_encoded_size = FreeSet.encode_size_max(block_count);
+            return 2 * CheckpointTrailer.block_count_max(free_set_encoded_size);
         }
 
         fn block_offset(address: u64) u64 {
