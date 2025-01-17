@@ -273,34 +273,26 @@ class QueryFilter:
 class CPacket(ctypes.Structure):
     @classmethod
     def from_param(cls, obj):
-        validate_uint(bits=8, name="operation", number=obj.operation)
         validate_uint(bits=32, name="data_size", number=obj.data_size)
-        validate_uint(bits=32, name="batch_size", number=obj.batch_size)
+        validate_uint(bits=16, name="tag", number=obj.tag)
+        validate_uint(bits=8, name="operation", number=obj.operation)
         return cls(
-            next=obj.next,
             user_data=obj.user_data,
+            data=obj.data,
+            data_size=obj.data_size,
+            tag=obj.tag,
             operation=obj.operation,
             status=obj.status,
-            data_size=obj.data_size,
-            data=obj.data,
-            batch_next=obj.batch_next,
-            batch_tail=obj.batch_tail,
-            batch_size=obj.batch_size,
-            batch_allowed=obj.batch_allowed,
         )
 
 CPacket._fields_ = [ # noqa: SLF001
-    ("next", ctypes.POINTER(CPacket)),
     ("user_data", ctypes.c_void_p),
+    ("data", ctypes.c_void_p),
+    ("data_size", ctypes.c_uint32),
+    ("tag", ctypes.c_uint16),
     ("operation", ctypes.c_uint8),
     ("status", ctypes.c_uint8),
-    ("data_size", ctypes.c_uint32),
-    ("data", ctypes.c_void_p),
-    ("batch_next", ctypes.POINTER(CPacket)),
-    ("batch_tail", ctypes.POINTER(CPacket)),
-    ("batch_size", ctypes.c_uint32),
-    ("batch_allowed", ctypes.c_bool),
-    ("reserved", ctypes.c_uint8 * 7),
+    ("reserved", ctypes.c_uint8 * 32),
 ]
 
 

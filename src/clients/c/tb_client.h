@@ -250,17 +250,13 @@ typedef enum TB_PACKET_STATUS {
 } TB_PACKET_STATUS;
 
 typedef struct tb_packet_t {
-    struct tb_packet_t* next;
     void* user_data;
+    void* data;
+    uint32_t data_size;
+    uint16_t tag;
     uint8_t operation;
     uint8_t status;
-    uint32_t data_size;
-    void* data;
-    struct tb_packet_t* batch_next;
-    struct tb_packet_t* batch_tail;
-    uint32_t batch_size;
-    uint8_t batch_allowed;
-    uint8_t reserved[7];
+    uint8_t reserved[32];
 } tb_packet_t;
 
 typedef void* tb_client_t; 

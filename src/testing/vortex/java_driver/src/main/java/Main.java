@@ -1,15 +1,28 @@
 import java.io.IOException;
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
+import java.rmi.UnexpectedException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+
 import com.tigerbeetle.AccountBatch;
+import com.tigerbeetle.AccountFlags;
 import com.tigerbeetle.Client;
+import com.tigerbeetle.CreateAccountResult;
+import com.tigerbeetle.CreateAccountResultBatch;
+import com.tigerbeetle.CreateTransferResult;
+import com.tigerbeetle.CreateTransferResultBatch;
 import com.tigerbeetle.IdBatch;
 import com.tigerbeetle.TransferBatch;
+import com.tigerbeetle.TransferFlags;
 import com.tigerbeetle.UInt128;
 
 /**
@@ -55,24 +68,42 @@ record Driver(Client client, Reader reader, Writer writer) {
   /**
    * Reads the next operation from stdin, runs it, collects the results, and writes them back to
    * stdout.
-   */
-  void next() throws IOException {
+      * @throws ExecutionException
+      * @throws InterruptedException
+      */
+  void next() throws IOException, InterruptedException, ExecutionException {
     reader.read(1 + 4); // operation + count
     var operation = Operation.fromValue(reader.u8());
     var count = reader.u32();
 
+    // Process asynchronously for testing batched requests.
+    final var random = new Random();
+    final boolean isAsync = random.nextBoolean();
+
     switch (operation) {
       case CREATE_ACCOUNTS:
-        createAccounts(reader, writer, count);
+        if (isAsync)
+          createAccountsAsync(reader, writer, count);
+        else
+          createAccounts(reader, writer, count);
         break;
       case CREATE_TRANSFERS:
-        createTransfers(reader, writer, count);
+        if (isAsync)
+          createTransfersAsync(reader, writer, count);
+        else
+          createTransfers(reader, writer, count);
         break;
       case LOOKUP_ACCOUNTS:
-        lookupAccounts(reader, writer, count);
+        if (isAsync)
+          lookupAccountsAsync(reader, writer, count);
+        else
+          lookupAccounts(reader, writer, count);
         break;
       case LOOKUP_TRANSFERS:
-        lookupTransfers(reader, writer, count);
+        if (isAsync)
+          lookupTransfersAsync(reader, writer, count);
+        else
+          lookupTransfers(reader, writer, count);
         break;
       case GET_ACCOUNT_BALANCES:
       case GET_ACCOUNT_TRANSFERS:
@@ -100,7 +131,7 @@ record Driver(Client client, Reader reader, Writer writer) {
       reader.u32(); // `reserved`
       batch.setLedger(reader.u32());
       batch.setCode(reader.u16());
-      batch.setFlags(reader.u16());  
+      batch.setFlags(reader.u16());
       reader.u64(); // `timestamp`
     }
     var results = client.createAccounts(batch);
@@ -109,6 +140,62 @@ record Driver(Client client, Reader reader, Writer writer) {
     while (results.next()) {
       writer.u32(results.getIndex());
       writer.u32(results.getResult().value);
+    }
+    writer.flush();
+  }
+
+  void createAccountsAsync(Reader reader, Writer writer, int count)
+    throws IOException, InterruptedException, ExecutionException {
+    reader.read(Driver.Operation.CREATE_ACCOUNTS.eventSize() * count);
+
+    record Request(CompletableFuture<CreateAccountResultBatch> future, int eventCount) {};
+    final var requests = new ArrayList<Request>(count);
+    var batch = new AccountBatch(count);
+    for (int index = 0; index < count; index++) {
+      batch.add();
+      batch.setId(reader.u128());
+      reader.u128(); // `debits_pending`
+      reader.u128(); // `debits_posted`
+      reader.u128(); // `credits_pending`
+      reader.u128(); // `credits_posted`
+      batch.setUserData128(reader.u128());
+      batch.setUserData64(reader.u64());
+      batch.setUserData32(reader.u32());
+      reader.u32(); // `reserved`
+      batch.setLedger(reader.u32());
+      batch.setCode(reader.u16());
+      batch.setFlags(reader.u16());
+      reader.u64(); // `timestamp`
+
+      if (!AccountFlags.hasLinked(batch.getFlags())) {
+        requests.add(new Request(client.createAccountsAsync(batch), batch.getLength()));
+        batch = new AccountBatch(count - index);
+      }
+    }
+
+    // Sending any eventual non-closed linked chain.
+    if (batch.getLength() > 0) {
+      requests.add(new Request(client.createAccountsAsync(batch), batch.getLength()));
+    }
+
+    record Result(int index, CreateAccountResult result){};
+    var results = new ArrayList<Result>(count);
+
+    // Wait for all tasks.
+    int index = 0;
+    for (final var request : requests) {
+        final var result = request.future.get();
+        while (result.next()) {
+          results.add(new Result(result.getIndex() + index, result.getResult()));
+        }
+        index += request.eventCount;
+    }
+
+    writer.allocate(4 + Driver.Operation.CREATE_ACCOUNTS.resultSize() * results.size());
+    writer.u32(results.size());
+    for (final var result : results) {
+      writer.u32(result.index);
+      writer.u32(result.result.value);
     }
     writer.flush();
   }
@@ -129,8 +216,8 @@ record Driver(Client client, Reader reader, Writer writer) {
       batch.setTimeout(reader.u32());
       batch.setLedger(reader.u32());
       batch.setCode(reader.u16());
-      batch.setFlags(reader.u16());  
-      batch.setTimestamp(reader.u64());  
+      batch.setFlags(reader.u16());
+      batch.setTimestamp(reader.u64());
     }
     var results = client.createTransfers(batch);
     writer.allocate(4 + Driver.Operation.CREATE_ACCOUNTS.resultSize() * results.getLength());
@@ -138,6 +225,62 @@ record Driver(Client client, Reader reader, Writer writer) {
     while (results.next()) {
       writer.u32(results.getIndex());
       writer.u32(results.getResult().value);
+    }
+    writer.flush();
+  }
+
+  void createTransfersAsync(Reader reader, Writer writer, int count)
+    throws IOException, InterruptedException, ExecutionException {
+    reader.read(Driver.Operation.CREATE_TRANSFERS.eventSize() * count);
+
+    record Request(CompletableFuture<CreateTransferResultBatch> future, int eventCount) {};
+    final var requests = new ArrayList<Request>(count);
+    var batch = new TransferBatch(count);
+    for (int index = 0; index < count; index++) {
+      batch.add();
+      batch.setId(reader.u128());
+      batch.setDebitAccountId(reader.u128());
+      batch.setCreditAccountId(reader.u128());
+      batch.setAmount(reader.u64(), reader.u64());
+      batch.setPendingId(reader.u128());
+      batch.setUserData128(reader.u128());
+      batch.setUserData64(reader.u64());
+      batch.setUserData32(reader.u32());
+      batch.setTimeout(reader.u32());
+      batch.setLedger(reader.u32());
+      batch.setCode(reader.u16());
+      batch.setFlags(reader.u16());
+      batch.setTimestamp(reader.u64());
+
+      if (!TransferFlags.hasLinked(batch.getFlags())) {
+        requests.add(new Request(client.createTransfersAsync(batch), batch.getLength()));
+        batch = new TransferBatch(count - index);
+      }
+    }
+
+    // Sending any eventual non-closed linked chain.
+    if (batch.getLength() > 0) {
+      requests.add(new Request(client.createTransfersAsync(batch), batch.getLength()));
+    }
+
+    record Result(int index, CreateTransferResult result){};
+    var results = new ArrayList<Result>(count);
+
+    // Wait for all tasks.
+    int index = 0;
+    for (final var request : requests) {
+        final var result = request.future.get();
+        while (result.next()) {
+          results.add(new Result(result.getIndex() + index, result.getResult()));
+        }
+        index += request.eventCount;
+    }
+
+    writer.allocate(4 + Driver.Operation.CREATE_ACCOUNTS.resultSize() * results.size());
+    writer.u32(results.size());
+    for(final var result : results) {
+      writer.u32(result.index);
+      writer.u32(result.result.value);
     }
     writer.flush();
   }
@@ -170,6 +313,68 @@ record Driver(Client client, Reader reader, Writer writer) {
     writer.flush();
   }
 
+  void lookupAccountsAsync(Reader reader, Writer writer, int count)
+    throws IOException, InterruptedException, ExecutionException {
+    reader.read(Driver.Operation.LOOKUP_ACCOUNTS.eventSize() * count);
+
+    final var requests = new ArrayList<CompletableFuture<AccountBatch>>(count);
+    for (int index = 0; index < count; index++) {
+      var batch = new IdBatch(1);
+      batch.add();
+      batch.setId(reader.u128());
+
+      requests.add(client.lookupAccountsAsync(batch));
+    }
+
+    record Result(
+      byte[] id,
+      BigInteger debitsPending, BigInteger debitsPosted,
+      BigInteger creditsPending, BigInteger creditsPosted,
+      byte[] userData128, long userData64, int userData32,
+      int ledger, int code, int flags, long timestamp) {};
+    var results = new ArrayList<Result>(count);
+
+    // Wait for all tasks.
+    for (final var request : requests) {
+      final var result = request.get();
+
+      if (result.next()) {
+        results.add(new Result(
+          result.getId(),
+          result.getDebitsPending(),
+          result.getDebitsPosted(),
+          result.getCreditsPending(),
+          result.getCreditsPosted(),
+          result.getUserData128(),
+          result.getUserData64(),
+          result.getUserData32(),
+          result.getLedger(),
+          result.getCode(),
+          result.getFlags(),
+          result.getTimestamp()));
+      }
+    }
+
+    writer.allocate(4 + Driver.Operation.LOOKUP_ACCOUNTS.resultSize() * results.size());
+    writer.u32(results.size());
+    for (final var result : results) {
+      writer.u128(result.id);
+      writer.u128(UInt128.asBytes(result.debitsPending));
+      writer.u128(UInt128.asBytes(result.debitsPosted));
+      writer.u128(UInt128.asBytes(result.creditsPending));
+      writer.u128(UInt128.asBytes(result.creditsPosted));
+      writer.u128(result.userData128);
+      writer.u64(result.userData64);
+      writer.u32(result.userData32);
+      writer.u32(0); // `reserved`
+      writer.u32(result.ledger);
+      writer.u16(result.code);
+      writer.u16(result.flags);
+      writer.u64(result.timestamp);
+    }
+    writer.flush();
+  }
+
   void lookupTransfers(Reader reader, Writer writer, int count) throws IOException {
     reader.read(Driver.Operation.LOOKUP_TRANSFERS.eventSize() * count);
     var batch = new IdBatch(count);
@@ -194,6 +399,69 @@ record Driver(Client client, Reader reader, Writer writer) {
       writer.u16(results.getCode());
       writer.u16(results.getFlags());
       writer.u64(results.getTimestamp());
+    }
+    writer.flush();
+  }
+
+  void lookupTransfersAsync(Reader reader, Writer writer, int count)
+    throws IOException, InterruptedException, ExecutionException {
+    reader.read(Driver.Operation.LOOKUP_TRANSFERS.eventSize() * count);
+
+    final var requests = new ArrayList<CompletableFuture<TransferBatch>>(count);
+    for (int index = 0; index < count; index++) {
+      var batch = new IdBatch(count);
+      batch.add();
+      batch.setId(reader.u128());
+
+      requests.add(client.lookupTransfersAsync(batch));
+    }
+
+    record Result(
+      byte[] id,
+      byte[] debitAccountId, byte[] creditAccountId,
+      BigInteger amount, byte[] pendingId,
+      byte[] userData128, long userData64, int userData32,
+      int timeout, int ledger, int code, int flags, long timestamp) {};
+    var results = new ArrayList<Result>(count);
+
+    // Wait for all tasks.
+    for (final var request : requests) {
+      final var result = request.get();
+
+      if (result.next()) {
+        results.add(new Result(
+          result.getId(),
+          result.getDebitAccountId(),
+          result.getCreditAccountId(),
+          result.getAmount(),
+          result.getPendingId(),
+          result.getUserData128(),
+          result.getUserData64(),
+          result.getUserData32(),
+          result.getTimeout(),
+          result.getLedger(),
+          result.getCode(),
+          result.getFlags(),
+          result.getTimestamp()));
+      }
+    }
+
+    writer.allocate(4 + Driver.Operation.LOOKUP_TRANSFERS.resultSize() * results.size());
+    writer.u32(results.size());
+    for (final var result : results) {
+      writer.u128(result.id);
+      writer.u128(result.debitAccountId);
+      writer.u128(result.creditAccountId);
+      writer.u128(UInt128.asBytes(result.amount));
+      writer.u128(result.pendingId);
+      writer.u128(result.userData128);
+      writer.u64(result.userData64);
+      writer.u32(result.userData32);
+      writer.u32(result.timeout);
+      writer.u32(result.ledger);
+      writer.u16(result.code);
+      writer.u16(result.flags);
+      writer.u64(result.timestamp);
     }
     writer.flush();
   }
@@ -271,7 +539,7 @@ record Driver(Client client, Reader reader, Writer writer) {
 
   /**
    * Reads sized chunks into a buffer, and uses that to convert from
-   * the Vortex driver binary protocol data to natively typed values. 
+   * the Vortex driver binary protocol data to natively typed values.
    *
    * The entire `read` buffer must be consumed before calling `read` again.
    */
@@ -321,7 +589,7 @@ record Driver(Client client, Reader reader, Writer writer) {
   }
 
   /**
-   * Allocates a buffer of a certain size, and writes natively typed values as 
+   * Allocates a buffer of a certain size, and writes natively typed values as
    * Vortex driver binary protocol data.
    *
    * The entire allocated buffer must be filled before writing or allocating a

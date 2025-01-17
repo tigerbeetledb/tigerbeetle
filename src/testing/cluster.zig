@@ -685,6 +685,7 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
             request_operation: StateMachine.Operation,
             request_message: *Message,
             request_body_size: usize,
+            batch_count: u16,
         ) void {
             assert(cluster.client_eviction_reasons[client_index] == null);
 
@@ -699,6 +700,7 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
                 .command = .request,
                 .operation = vsr.Operation.from(StateMachine, request_operation),
                 .size = @intCast(@sizeOf(vsr.Header) + request_body_size),
+                .batch_count = batch_count,
             };
 
             client.raw_request(
@@ -718,12 +720,14 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
             user_data: u128,
             operation: StateMachine.Operation,
             timestamp: u64,
-            result: []u8,
+            result: []const u8,
+            batch_count: u16,
         ) void {
             _ = user_data;
             _ = operation;
             _ = timestamp;
             _ = result;
+            _ = batch_count;
         }
 
         fn client_on_reply(
@@ -731,6 +735,8 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
             request_message: *Message.Request,
             reply_message: *Message.Reply,
         ) void {
+            assert(request_message.header.batch_count == reply_message.header.batch_count);
+
             const cluster: *Cluster = @ptrCast(@alignCast(client.on_reply_context.?));
             assert(reply_message.header.invalid() == null);
             assert(reply_message.header.cluster == cluster.options.cluster_id);

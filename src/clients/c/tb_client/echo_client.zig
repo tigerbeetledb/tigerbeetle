@@ -1,6 +1,5 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const testing = std.testing;
 const mem = std.mem;
 
 const vsr = @import("../tb_client.zig").vsr;
@@ -20,36 +19,9 @@ pub fn EchoClientType(
 
         // Exposing the same types the real client does:
         const VSRClient = vsr.ClientType(StateMachine_, MessageBus, Time);
-        pub const StateMachine = VSRClient.StateMachine;
+
+        pub const StateMachine = EchoStateMachineType(VSRClient.StateMachine);
         pub const Request = VSRClient.Request;
-
-        /// Custom Demuxer which treats EventType(operation)s as results and echoes them back.
-        pub fn DemuxerType(comptime operation: StateMachine.Operation) type {
-            return struct {
-                const Demuxer = @This();
-
-                results: []u8,
-                events_decoded: u32 = 0,
-
-                pub fn init(reply: []u8) Demuxer {
-                    return Demuxer{ .results = reply };
-                }
-
-                pub fn decode(self: *Demuxer, event_offset: u32, event_count: u32) []u8 {
-                    // Double check the event offset/count are contiguously decoded from results.
-                    assert(self.events_decoded == event_offset);
-                    self.events_decoded += event_count;
-
-                    // Double check the results has enough event bytes to echo back.
-                    const byte_count = @sizeOf(StateMachine.EventType(operation)) * event_count;
-                    assert(self.results.len >= byte_count);
-
-                    // Echo back the result bytes and consume the events.
-                    defer self.results = self.results[byte_count..];
-                    return self.results[0..byte_count];
-                }
-            };
-        }
 
         id: u128,
         cluster: u128,
@@ -96,6 +68,7 @@ pub fn EchoClientType(
 
             self.reply_timestamp += 1;
             const timestamp = self.reply_timestamp;
+            const batch_count = inflight.message.header.batch_count;
 
             // Allocate a reply message.
             const reply = self.get_message().build(.request);
@@ -121,6 +94,7 @@ pub fn EchoClientType(
                         operation.cast(EchoClient.StateMachine),
                         timestamp,
                         reply.body_used(),
+                        batch_count,
                     );
                 },
                 .register => |callback| {
@@ -151,6 +125,7 @@ pub fn EchoClientType(
                 .command = .request,
                 .operation = .register,
                 .release = vsr.Release.minimum,
+                .batch_count = 0,
             };
 
             assert(self.request_number == 0);
@@ -169,6 +144,7 @@ pub fn EchoClientType(
             user_data: u128,
             operation: StateMachine.Operation,
             events: []const u8,
+            batch_count: u16,
         ) void {
             const event_size: usize = switch (operation) {
                 inline else => |operation_comptime| @sizeOf(
@@ -189,6 +165,7 @@ pub fn EchoClientType(
                 .release = vsr.Release.minimum,
                 .operation = vsr.Operation.from(StateMachine, operation),
                 .size = @intCast(@sizeOf(Header) + events.len),
+                .batch_count = batch_count,
             };
 
             stdx.copy_disjoint(.exact, u8, message.body_used(), events);
@@ -229,40 +206,20 @@ pub fn EchoClientType(
     };
 }
 
-test "Echo Demuxer" {
-    const StateMachine = vsr.state_machine.StateMachineType(
-        @import("../../../testing/storage.zig").Storage,
-        constants.state_machine_config,
-    );
-    const MessageBus = vsr.message_bus.MessageBusClient;
-    const Time = vsr.time.Time;
-    const Client = EchoClientType(StateMachine, MessageBus, Time);
+/// Re-exports all StateMachine symbols used by the client, but making `Event` and `Result`
+/// the same types.
+fn EchoStateMachineType(comptime StateMachine: type) type {
+    return struct {
+        pub const Operation = StateMachine.Operation;
 
-    var prng = std.rand.DefaultPrng.init(42);
-    inline for ([_]StateMachine.Operation{
-        .create_accounts,
-        .create_transfers,
-    }) |operation| {
-        const Event = StateMachine.EventType(operation);
-        var events: [@divExact(constants.message_body_size_max, @sizeOf(Event))]Event = undefined;
-        prng.fill(std.mem.asBytes(&events));
+        pub const EventType = StateMachine.EventType;
+        pub const event_size_bytes = StateMachine.event_size_bytes;
+        pub const event_is_slice = StateMachine.event_is_slice;
 
-        for (0..events.len) |i| {
-            const events_total = i + 1;
-            const events_data = std.mem.sliceAsBytes(events[0..events_total]);
-            var demuxer = Client.DemuxerType(operation).init(events_data);
+        pub const ResultType = StateMachine.EventType; // Results are equal Events.
+        pub const result_size_bytes = StateMachine.event_size_bytes;
 
-            var events_offset: usize = 0;
-            while (events_offset < events_total) {
-                const events_limit = events_total - events_offset;
-                const events_count = @max(1, prng.random().uintAtMost(usize, events_limit));
-                defer events_offset += events_count;
-
-                const reply_bytes = demuxer.decode(@intCast(events_offset), @intCast(events_count));
-                const reply: []Event = @alignCast(std.mem.bytesAsSlice(Event, reply_bytes));
-                try testing.expectEqual(&reply[0], &events[events_offset]);
-                try testing.expectEqual(reply.len, events[events_offset..][0..events_count].len);
-            }
-        }
-    }
+        pub const operation_batch_max = StateMachine.operation_batch_max;
+        pub const operation_from_vsr = StateMachine.operation_from_vsr;
+    };
 }

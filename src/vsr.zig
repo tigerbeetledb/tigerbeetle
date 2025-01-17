@@ -25,6 +25,7 @@ pub const superblock = @import("vsr/superblock.zig");
 pub const aof = @import("aof.zig");
 pub const repl = @import("repl.zig");
 pub const statsd = @import("statsd.zig");
+pub const batch = @import("vsr/batch.zig");
 pub const lsm = .{
     .tree = @import("lsm/tree.zig"),
     .groove = @import("lsm/groove.zig"),
@@ -1263,6 +1264,7 @@ pub const Headers = struct {
             .commit = 0,
             .timestamp = 0,
             .request = 0,
+            .batch_count = 0,
         };
     }
 

@@ -1502,6 +1502,7 @@ test "Cluster: client: empty command=request operation=register body" {
         .command = .request,
         .operation = .register,
         .release = releases[0].release,
+        .batch_count = 0,
     };
     request_header.set_checksum_body(&.{}); // Note the absence of a `vsr.RegisterRequest`.
     request_header.set_checksum();
@@ -2484,7 +2485,13 @@ const TestClients = struct {
 
                         const body_size = 123;
                         @memset(message.buffer[@sizeOf(vsr.Header)..][0..body_size], 42);
-                        t.cluster.request(c, .echo, message, body_size);
+                        t.cluster.request(
+                            c,
+                            .echo,
+                            message,
+                            body_size,
+                            0,
+                        );
                     }
                 }
             }

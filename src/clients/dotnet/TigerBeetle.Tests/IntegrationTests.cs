@@ -1999,17 +1999,6 @@ public class IntegrationTests
         Assert.IsTrue(accountResults.Length == 0);
 
         var tasks = new Task<CreateTransferResult>[TASKS_QTY];
-
-        async Task<CreateTransferResult> asyncAction(Transfer transfer)
-        {
-            return await client.CreateTransferAsync(transfer);
-        }
-
-        CreateTransferResult syncAction(Transfer transfer)
-        {
-            return client.CreateTransfer(transfer);
-        }
-
         for (int i = 0; i < TASKS_QTY; i++)
         {
             // The Linked flag will cause the
@@ -2026,9 +2015,7 @@ public class IntegrationTests
                 Flags = flags
             };
 
-            // Starts multiple requests.
-            // Wraps the syncAction into a Task for unified logic handling both async and sync tests.
-            tasks[i] = isAsync ? asyncAction(transfer) : Task.Run(() => syncAction(transfer));
+            tasks[i] = isAsync ? client.CreateTransferAsync(transfer) : Task.Run(() => client.CreateTransfer(transfer));
         }
 
         Task.WhenAll(tasks).Wait();
@@ -2166,16 +2153,6 @@ public class IntegrationTests
         Assert.AreEqual(a.Flags, b.Flags);
         Assert.AreEqual(a.Code, b.Code);
         Assert.AreEqual(a.Ledger, b.Ledger);
-    }
-
-    private static bool AssertException<T>(Exception exception) where T : Exception
-    {
-        while (exception is AggregateException aggregateException && aggregateException.InnerException != null)
-        {
-            exception = aggregateException.InnerException;
-        }
-
-        return exception is T;
     }
 }
 

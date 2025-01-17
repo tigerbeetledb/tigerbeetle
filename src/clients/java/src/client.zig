@@ -119,26 +119,20 @@ const NativeClient = struct {
             return undefined;
         };
 
-        const packet = global_allocator.create(tb.tb_packet_t) catch {
+        const packet: *tb.tb_packet_t = global_allocator.create(tb.tb_packet_t) catch {
             ReflectionHelper.assertion_error_throw(env, "Request could not allocate a packet");
             return undefined;
         };
 
         // Holds a global reference to prevent GC before the callback.
         const global_ref = JNIHelper.new_global_reference(env, request_obj);
-
         packet.* = .{
-            .next = undefined,
             .user_data = global_ref,
             .operation = operation,
-            .status = undefined,
             .data_size = @intCast(send_buffer.len),
             .data = send_buffer.ptr,
-            .batch_next = undefined,
-            .batch_tail = undefined,
-            .batch_size = undefined,
-            .batch_allowed = undefined,
-            .reserved = undefined,
+            .tag = 0,
+            .status = undefined,
         };
 
         tb.submit(context.client, packet);
