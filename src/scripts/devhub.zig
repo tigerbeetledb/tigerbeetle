@@ -129,6 +129,35 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
         "checksum message size max",
         "us",
     );
+    const format_time_ms = blk: {
+        timer.reset();
+
+        try shell.exec(
+            "./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 datafile",
+            .{},
+        );
+
+        break :blk timer.read() / std.time.ns_per_ms;
+    };
+    const startup_time_ms = blk: {
+        timer.reset();
+
+        var process = try shell.spawn(
+            .{
+                .stdin_behavior = .Pipe,
+                .stdout_behavior = .Pipe,
+                .stderr_behavior = .Inherit,
+            },
+            "./tigerbeetle start --addresses=0 --cache-grid=8GiB datafile",
+            .{},
+        );
+        errdefer _ = process.kill() catch unreachable;
+
+        var port_buf: [std.fmt.count("{}\n", .{std.math.maxInt(u16)})]u8 = undefined;
+        _ = try process.stdout.?.readAll(&port_buf);
+
+        break :blk timer.read() / std.time.ns_per_ms;
+    };
 
     const ci_pipeline_duration_s = blk: {
         const times_gh = try shell.exec_stdout("gh run list -c {sha} -e merge_group " ++
@@ -167,6 +196,8 @@ fn devhub_metrics(shell: *Shell, cli_args: CLIArgs) !void {
                 .unit = "us",
             },
             .{ .name = "build time", .value = build_time_ms, .unit = "ms" },
+            .{ .name = "format time", .value = format_time_ms, .unit = "ms" },
+            .{ .name = "startup time - 8GiB grid cache", .value = startup_time_ms, .unit = "ms" },
         },
     };
 
