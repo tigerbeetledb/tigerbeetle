@@ -267,6 +267,11 @@ pub fn ContextType(
                     @panic("IO.run() failed");
                 };
             }
+
+            // If evicted, the inflight request was already canceled during eviction.
+            if (self.eviction_reason == null) {
+                self.cancel_request_inflight();
+            }
             self.cancel_queued_packets();
         }
 
@@ -280,6 +285,17 @@ pub fn ContextType(
             while (self.submitted.pop()) |packet| {
                 packet.assert_phase(.submitted);
                 self.packet_cancel(packet);
+            }
+        }
+
+        /// Cancel the current inflight packet, as it won't be replied anymore.
+        fn cancel_request_inflight(self: *Context) void {
+            if (self.client.request_inflight) |*inflight| {
+                if (inflight.message.header.operation != .register) {
+                    const packet = @as(UserData, @bitCast(inflight.user_data)).packet;
+                    packet.assert_phase(.sent);
+                    self.packet_cancel(packet);
+                }
             }
         }
 
@@ -579,14 +595,7 @@ pub fn ContextType(
 
             self.eviction_reason = eviction.header.reason;
 
-            // Cancel the current inflight packet, as it won't be replied anymore.
-            if (self.client.request_inflight) |*inflight| {
-                if (inflight.message.header.operation != .register) {
-                    const packet = @as(UserData, @bitCast(inflight.user_data)).packet;
-                    packet.assert_phase(.sent);
-                    self.packet_cancel(packet);
-                }
-            }
+            self.cancel_request_inflight();
             self.cancel_queued_packets();
         }
 
