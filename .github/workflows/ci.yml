@@ -180,7 +180,7 @@ jobs:
 
   devhub:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     environment: devhub
     permissions:
       pages: write
@@ -190,7 +190,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2147483647
-      - run: sudo apt install kcov
+      - run: sudo apt-get update && sudo apt-get install -y kcov
       - run: ./zig/download.sh
       # Run under sudo to enable memory locking for accurate RSS stats.
       - run: sudo -E ./zig/zig build scripts -- devhub --sha=${{ github.sha }}
@@ -229,7 +229,7 @@ jobs:
         with:
           fetch-depth: 2147483647
       - name: Install dependencies
-        run: sudo apt install -y jq curl
+        run: sudo apt-get install -y jq curl
       - uses: actions/setup-java@v4
         with:
           distribution: "temurin"

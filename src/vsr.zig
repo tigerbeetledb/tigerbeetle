@@ -720,7 +720,7 @@ pub const Timeout = struct {
     /// Sets the value of `after` as a function of `rtt` and `attempts`.
     /// Adds exponential backoff and jitter.
     /// May be called only after a timeout has been stopped or reset, to prevent backward jumps.
-    pub fn set_after_for_rtt_and_attempts(self: *Timeout, random: std.rand.Random) void {
+    fn set_after_for_rtt_and_attempts(self: *Timeout, random: std.rand.Random) void {
         // If `after` is reduced by this function to less than `ticks`, then `fired()` will panic:
         assert(self.ticks == 0);
         assert(self.rtt > 0);
@@ -749,18 +749,23 @@ pub const Timeout = struct {
         assert(self.after_dynamic.? > 0);
     }
 
-    pub fn set_rtt(self: *Timeout, rtt_ticks: u64) void {
+    pub fn set_rtt_ns(self: *Timeout, rtt_ns: u64) void {
         assert(self.rtt > 0);
-        assert(rtt_ticks > 0);
 
-        log.debug("{}: {s} rtt={}..{}", .{
-            self.id,
-            self.name,
-            self.rtt,
-            rtt_ticks,
-        });
+        const rtt_ms = @divFloor(rtt_ns, std.time.ns_per_ms);
+        const rtt_ticks = @max(1, @divFloor(rtt_ms, constants.tick_ms));
+        const rtt_ticks_clamped = @min(rtt_ticks, constants.rtt_max_ticks);
 
-        self.rtt = rtt_ticks;
+        if (self.rtt != rtt_ticks_clamped) {
+            log.debug("{}: {s} rtt={}..{}", .{
+                self.id,
+                self.name,
+                self.rtt,
+                rtt_ticks_clamped,
+            });
+
+            self.rtt = rtt_ticks_clamped;
+        }
     }
 
     pub fn start(self: *Timeout) void {

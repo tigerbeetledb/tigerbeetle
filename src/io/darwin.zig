@@ -13,6 +13,7 @@ const DirectIO = @import("../io.zig").DirectIO;
 
 pub const IO = struct {
     kq: fd_t,
+    event_id: Event = 0,
     time: Time = .{},
     io_inflight: usize = 0,
     timeouts: FIFOType(Completion) = .{ .name = "io_timeouts" },
@@ -691,6 +692,79 @@ pub const IO = struct {
                 }
             },
         );
+    }
+
+    pub const Event = usize;
+    pub const INVALID_EVENT: Event = 0;
+
+    pub fn open_event(
+        self: *IO,
+    ) !Event {
+        self.event_id += 1;
+        const event = self.event_id;
+        assert(event != INVALID_EVENT);
+
+        var kev = mem.zeroes([1]posix.Kevent);
+        kev[0].ident = event;
+        kev[0].filter = posix.system.EVFILT_USER;
+        kev[0].flags = posix.system.EV_ADD | posix.system.EV_ENABLE | posix.system.EV_CLEAR;
+
+        const polled = posix.kevent(self.kq, &kev, kev[0..0], null) catch |err| switch (err) {
+            error.AccessDenied => unreachable, // EV_FILTER is allowed for every user.
+            error.EventNotFound => unreachable, // We're not modifying or deleting an existing one.
+            error.ProcessNotFound => unreachable, // We're not monitoring a process.
+            error.Overflow, error.SystemResources => return error.SystemResources,
+        };
+        assert(polled == 0);
+
+        return event;
+    }
+
+    pub fn event_listen(
+        self: *IO,
+        event: Event,
+        completion: *Completion,
+        comptime on_event: fn (*Completion) void,
+    ) void {
+        assert(event != INVALID_EVENT);
+        completion.* = .{
+            .next = null,
+            .context = null,
+            .operation = undefined,
+            .callback = struct {
+                fn on_complete(_: *IO, completion_inner: *Completion) void {
+                    on_event(completion_inner);
+                }
+            }.on_complete,
+        };
+
+        self.io_inflight += 1;
+    }
+
+    pub fn event_trigger(self: *IO, event: Event, completion: *Completion) void {
+        assert(event != INVALID_EVENT);
+
+        var kev = mem.zeroes([1]posix.Kevent);
+        kev[0].ident = event;
+        kev[0].filter = posix.system.EVFILT_USER;
+        kev[0].fflags = posix.system.NOTE_TRIGGER;
+        kev[0].udata = @intFromPtr(completion);
+
+        const polled: usize = posix.kevent(self.kq, &kev, kev[0..0], null) catch unreachable;
+        assert(polled == 0);
+    }
+
+    pub fn close_event(self: *IO, event: Event) void {
+        assert(event != INVALID_EVENT);
+
+        var kev = mem.zeroes([1]posix.Kevent);
+        kev[0].ident = event;
+        kev[0].filter = posix.system.EVFILT_USER;
+        kev[0].flags = posix.system.EV_DELETE;
+        kev[0].udata = 0; // Not needed for EV_DELETE.
+
+        const polled = posix.kevent(self.kq, &kev, kev[0..0], null) catch unreachable;
+        assert(polled == 0);
     }
 
     pub const INVALID_SOCKET = -1;

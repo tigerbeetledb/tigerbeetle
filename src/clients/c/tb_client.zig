@@ -45,13 +45,13 @@ pub const InitError = @import("tb_client/context.zig").Error;
 
 const DefaultContext = blk: {
     const ClientType = @import("../../vsr/client.zig").ClientType;
-    const Client = ClientType(StateMachine, MessageBus);
+    const Client = ClientType(StateMachine, MessageBus, vsr.time.Time);
     break :blk ContextType(Client);
 };
 
 const TestingContext = blk: {
     const EchoClientType = @import("tb_client/echo_client.zig").EchoClientType;
-    const EchoClient = EchoClientType(StateMachine, MessageBus);
+    const EchoClient = EchoClientType(StateMachine, MessageBus, vsr.time.Time);
     break :blk ContextType(EchoClient);
 };
 

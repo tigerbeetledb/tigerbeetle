@@ -728,6 +728,9 @@ pub const tick_ms = config.process.tick_ms;
 /// This should be set higher rather than lower to avoid flooding the network at startup.
 pub const rtt_ticks = config.process.rtt_ms / tick_ms;
 
+/// Maximum RTT, to prevent too-long timeouts.
+pub const rtt_max_ticks = config.process.rtt_max_ms / tick_ms;
+
 /// The multiple of round-trip time for RTT-sensitive timeouts.
 pub const rtt_multiple = 2;
 

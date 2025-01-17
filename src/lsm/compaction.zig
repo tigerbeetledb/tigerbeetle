@@ -1554,13 +1554,17 @@ pub fn CompactionType(
                 .level_b = compaction.level_b,
             });
 
-            const values_in_a, const values_in_b = compaction.merge_inputs();
-            assert(values_in_a != null or values_in_b != null);
+            const values_source_a, const values_source_b = compaction.merge_inputs();
+            assert(values_source_a != null or values_source_b != null);
 
-            const values_out = compaction.table_builder
+            const values_target = compaction.table_builder
                 .data_block_values()[compaction.table_builder.value_count..];
 
-            inline for ([_]?[]const Value{ values_in_a, values_in_b, values_out }) |values_maybe| {
+            inline for ([_]?[]const Value{
+                values_source_a,
+                values_source_b,
+                values_target,
+            }) |values_maybe| {
                 if (values_maybe) |values| {
                     assert(values.len > 0);
                     assert(values.len <= Table.data.value_count_max);
@@ -1568,17 +1572,20 @@ pub fn CompactionType(
             }
 
             // Do the actual merge from inputs to the output (table builder).
-            const merge_result: MergeResult = if (values_in_a == null) blk: {
-                const consumed = values_copy(values_out, values_in_b.?);
+            const merge_result: MergeResult = if (values_source_a == null) blk: {
+                const consumed = values_copy(values_target, values_source_b.?);
                 break :blk .{
                     .consumed_a = 0,
                     .consumed_b = consumed,
                     .dropped = 0,
                     .produced = consumed,
                 };
-            } else if (values_in_b == null) blk: {
+            } else if (values_source_b == null) blk: {
                 if (compaction.drop_tombstones) {
-                    const copy_result = values_copy_drop_tombstones(values_out, values_in_a.?);
+                    const copy_result = values_copy_drop_tombstones(
+                        values_target,
+                        values_source_a.?,
+                    );
                     break :blk .{
                         .consumed_a = copy_result.consumed,
                         .consumed_b = 0,
@@ -1586,7 +1593,7 @@ pub fn CompactionType(
                         .produced = copy_result.produced,
                     };
                 } else {
-                    const consumed = values_copy(values_out, values_in_a.?);
+                    const consumed = values_copy(values_target, values_source_a.?);
                     break :blk .{
                         .consumed_a = consumed,
                         .consumed_b = 0,
@@ -1595,9 +1602,9 @@ pub fn CompactionType(
                     };
                 }
             } else values_merge(
-                values_out,
-                values_in_a.?,
-                values_in_b.?,
+                values_target,
+                values_source_a.?,
+                values_source_b.?,
                 compaction.drop_tombstones,
             );
 
@@ -1859,18 +1866,18 @@ pub fn CompactionType(
         //
         // TODO: Add micro benchmarks.
 
-        fn values_copy(values_out: []Value, values_in: []const Value) u32 {
-            assert(values_in.len > 0);
-            assert(values_in.len <= Table.data.value_count_max);
-            assert(values_out.len > 0);
-            assert(values_out.len <= Table.data.value_count_max);
+        fn values_copy(values_target: []Value, values_source: []const Value) u32 {
+            assert(values_source.len > 0);
+            assert(values_source.len <= Table.data.value_count_max);
+            assert(values_target.len > 0);
+            assert(values_target.len <= Table.data.value_count_max);
 
-            const len: u32 = @intCast(@min(values_in.len, values_out.len));
+            const len: u32 = @intCast(@min(values_source.len, values_target.len));
             stdx.copy_disjoint(
                 .exact,
                 Value,
-                values_out[0..len],
-                values_in[0..len],
+                values_target[0..len],
+                values_source[0..len],
             );
 
             return len;
@@ -1881,40 +1888,40 @@ pub fn CompactionType(
             dropped: u32,
             produced: u32,
         };
-        /// Copy values from values_in to values_out, dropping tombstones as we go.
+        /// Copy values from values_source to values_target, dropping tombstones as we go.
         fn values_copy_drop_tombstones(
-            values_out: []Value,
-            values_in: []const Value,
+            values_target: []Value,
+            values_source: []const Value,
         ) CopyDropTombstonesResult {
-            assert(values_in.len > 0);
-            assert(values_in.len <= Table.data.value_count_max);
-            assert(values_out.len > 0);
-            assert(values_out.len <= Table.data.value_count_max);
+            assert(values_source.len > 0);
+            assert(values_source.len <= Table.data.value_count_max);
+            assert(values_target.len > 0);
+            assert(values_target.len <= Table.data.value_count_max);
 
-            var index_in: usize = 0;
-            var index_out: usize = 0;
+            var index_source: usize = 0;
+            var index_target: usize = 0;
             // Merge as many values as possible.
-            while (index_in < values_in.len and
-                index_out < values_out.len)
+            while (index_source < values_source.len and
+                index_target < values_target.len)
             {
-                const value_in = &values_in[index_in];
-                index_in += 1;
+                const value_in = &values_source[index_source];
+                index_source += 1;
                 if (tombstone(value_in)) {
                     assert(Table.usage != .secondary_index);
                     continue;
                 }
-                values_out[index_out] = value_in.*;
-                index_out += 1;
+                values_target[index_target] = value_in.*;
+                index_target += 1;
             }
             const copy_result: CopyDropTombstonesResult = .{
-                .consumed = @intCast(index_in),
-                .dropped = @intCast(index_in - index_out),
-                .produced = @intCast(index_out),
+                .consumed = @intCast(index_source),
+                .dropped = @intCast(index_source - index_target),
+                .produced = @intCast(index_target),
             };
             assert(copy_result.consumed > 0);
-            assert(copy_result.consumed <= values_in.len);
+            assert(copy_result.consumed <= values_source.len);
             assert(copy_result.dropped <= copy_result.consumed);
-            assert(copy_result.produced <= values_out.len);
+            assert(copy_result.produced <= values_target.len);
             assert(copy_result.produced == copy_result.consumed - copy_result.dropped);
             return copy_result;
         }
@@ -1929,70 +1936,70 @@ pub fn CompactionType(
         /// Merge values from table_a and table_b, with table_a taking precedence. Tombstones may
         /// or may not be dropped depending on bar.drop_tombstones.
         fn values_merge(
-            values_out: []Value,
-            values_in_a: []const Value,
-            values_in_b: []const Value,
+            values_target: []Value,
+            values_source_a: []const Value,
+            values_source_b: []const Value,
             drop_tombstones: bool,
         ) MergeResult {
-            assert(values_in_a.len > 0);
-            assert(values_in_a.len <= Table.data.value_count_max);
-            assert(values_in_b.len > 0);
-            assert(values_in_b.len <= Table.data.value_count_max);
-            assert(values_out.len > 0);
-            assert(values_out.len <= Table.data.value_count_max);
+            assert(values_source_a.len > 0);
+            assert(values_source_a.len <= Table.data.value_count_max);
+            assert(values_source_b.len > 0);
+            assert(values_source_b.len <= Table.data.value_count_max);
+            assert(values_target.len > 0);
+            assert(values_target.len <= Table.data.value_count_max);
 
-            var index_in_a: usize = 0;
-            var index_in_b: usize = 0;
-            var index_out: usize = 0;
+            var index_source_a: usize = 0;
+            var index_source_b: usize = 0;
+            var index_target: usize = 0;
 
-            while (index_in_a < values_in_a.len and
-                index_in_b < values_in_b.len and
-                index_out < values_out.len)
+            while (index_source_a < values_source_a.len and
+                index_source_b < values_source_b.len and
+                index_target < values_target.len)
             {
-                const value_a = &values_in_a[index_in_a];
-                const value_b = &values_in_b[index_in_b];
+                const value_a = &values_source_a[index_source_a];
+                const value_b = &values_source_b[index_source_b];
                 switch (std.math.order(key_from_value(value_a), key_from_value(value_b))) {
                     .lt => { // Pick value from level a.
-                        index_in_a += 1;
+                        index_source_a += 1;
                         if (drop_tombstones and tombstone(value_a)) {
                             assert(Table.usage != .secondary_index);
                             continue;
                         }
-                        values_out[index_out] = value_a.*;
-                        index_out += 1;
+                        values_target[index_target] = value_a.*;
+                        index_target += 1;
                     },
                     .gt => { // Pick value from level b.
-                        index_in_b += 1;
-                        values_out[index_out] = value_b.*;
-                        index_out += 1;
+                        index_source_b += 1;
+                        values_target[index_target] = value_b.*;
+                        index_target += 1;
                     },
                     .eq => { // Values have equal keys -- collapse them!
-                        index_in_a += 1;
-                        index_in_b += 1;
+                        index_source_a += 1;
+                        index_source_b += 1;
 
                         if (comptime Table.usage == .secondary_index) {
                             // Secondary index optimization --- cancel out put and remove.
                             assert(tombstone(value_a) != tombstone(value_b));
                         } else {
                             if (drop_tombstones and tombstone(value_a)) continue;
-                            values_out[index_out] = value_a.*;
-                            index_out += 1;
+                            values_target[index_target] = value_a.*;
+                            index_target += 1;
                         }
                     },
                 }
             }
 
             const merge_result: MergeResult = .{
-                .consumed_a = @intCast(index_in_a),
-                .consumed_b = @intCast(index_in_b),
-                .dropped = @intCast(index_in_a + index_in_b - index_out),
-                .produced = @intCast(index_out),
+                .consumed_a = @intCast(index_source_a),
+                .consumed_b = @intCast(index_source_b),
+                .dropped = @intCast(index_source_a + index_source_b - index_target),
+                .produced = @intCast(index_target),
             };
             assert(merge_result.consumed_a > 0 or merge_result.consumed_b > 0);
-            assert(merge_result.consumed_a <= values_in_a.len);
-            assert(merge_result.consumed_b <= values_in_b.len);
+            assert(merge_result.consumed_a <= values_source_a.len);
+            assert(merge_result.consumed_b <= values_source_b.len);
             assert(merge_result.dropped <= merge_result.consumed_a + merge_result.consumed_b);
-            assert(merge_result.produced <= values_out.len);
+            assert(merge_result.produced <= values_target.len);
             assert(merge_result.produced ==
                 merge_result.consumed_a + merge_result.consumed_b - merge_result.dropped);
             return merge_result;

@@ -3,6 +3,98 @@
 Subscribe to the [tracking issue #2231](https://github.com/tigerbeetle/tigerbeetle/issues/2231)
 to receive notifications about breaking changes!
 
+## TigerBeetle 0.16.21
+
+Released: 2025-01-13
+
+Happy 2025!
+
+### Safety And Performance
+
+- [#2637](https://github.com/tigerbeetle/tigerbeetle/pull/2637)
+
+  Fix multiple VOPR false positives
+
+- [#2632](https://github.com/tigerbeetle/tigerbeetle/pull/2632)
+
+  Disable costly cache map verification: trust, verify, but mind big-O!
+
+- [#2629](https://github.com/tigerbeetle/tigerbeetle/pull/2629)
+
+  Improve state sync performance by getting rid of `awaiting_checkpoint` state.
+
+- [#2624](https://github.com/tigerbeetle/tigerbeetle/pull/2624)
+
+  Improve VOPR coverage when running out of IOPs.
+
+- [#2593](https://github.com/tigerbeetle/tigerbeetle/pull/2593),
+  [#2623](https://github.com/tigerbeetle/tigerbeetle/pull/2623),
+  [#2625](https://github.com/tigerbeetle/tigerbeetle/pull/2625),
+  [#2626](https://github.com/tigerbeetle/tigerbeetle/pull/2626),
+  [#2627](https://github.com/tigerbeetle/tigerbeetle/pull/2627),
+  [#2628](https://github.com/tigerbeetle/tigerbeetle/pull/2628)
+
+  Improve WAL repair performance.
+
+- [#2613](https://github.com/tigerbeetle/tigerbeetle/pull/2613),
+  [#2616](https://github.com/tigerbeetle/tigerbeetle/pull/2616),
+  [#2620](https://github.com/tigerbeetle/tigerbeetle/pull/2620),
+  [#2622](https://github.com/tigerbeetle/tigerbeetle/pull/2622)
+
+  Improve replication performance.
+
+- [#2618](https://github.com/tigerbeetle/tigerbeetle/pull/2618)
+
+  Add simple metrics to the state machine.
+
+### Features
+
+- [#2615](https://github.com/tigerbeetle/tigerbeetle/pull/2615)
+
+  Greatly improve performance of append-only file (AOF). Note that this changes format of AOF on
+  disk.
+
+- [#2641](https://github.com/tigerbeetle/tigerbeetle/pull/2641)
+
+  Add `tigerbeetle inspect constants` command to visualize important compile-time parameters.
+
+- [#2630](https://github.com/tigerbeetle/tigerbeetle/pull/2630)
+
+  Use asynchronous disk IO on Windows (as a reminder, at the moment TigerBeetle server is considered
+  to production-ready only on Linux).
+
+- [#2635](https://github.com/tigerbeetle/tigerbeetle/pull/2635)
+
+  Add experimental alternative replication topologies (star and closed loop).
+
+### Internals
+
+- [#2634](https://github.com/tigerbeetle/tigerbeetle/pull/2634)
+
+  Move RingBufferType into stdx, TigerBeetle's extended standard library.
+
+- [#2639](https://github.com/tigerbeetle/tigerbeetle/pull/2639)
+
+  Run `go vet` on CI.
+
+- [#2631](https://github.com/tigerbeetle/tigerbeetle/pull/2631)
+
+  Fix tracing compatibility with perfetto.
+
+- [#2564](https://github.com/tigerbeetle/tigerbeetle/pull/2564),
+  [#2559](https://github.com/tigerbeetle/tigerbeetle/pull/2559).
+
+  Make it easier to investigate Vortex runs.
+
+- [#2610](https://github.com/tigerbeetle/tigerbeetle/pull/2610)
+
+  Correctly calculate the number of results in the Go client. Previously, the answer was correct
+  despite the logic being wrong!
+
+### TigerTracks 🎧
+
+- [Blush Response](https://open.spotify.com/track/0cSnUM2fNEx4pAkNfWpdkU?si=9d6eaaacfc5e467b)
+
 ## TigerBeetle 0.16.20
 
 Released: 2024-12-27

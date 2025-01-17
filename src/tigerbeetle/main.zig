@@ -555,13 +555,16 @@ const Command = struct {
     }
 
     pub fn repl(allocator: mem.Allocator, args: *const cli.Command.Repl) !void {
-        const Repl = vsr.repl.ReplType(vsr.message_bus.MessageBusClient);
+        const Repl = vsr.repl.ReplType(vsr.message_bus.MessageBusClient, Time);
 
         var repl_instance = try Repl.init(
             allocator,
-            args.addresses.const_slice(),
-            args.cluster,
-            args.verbose,
+            .{},
+            .{
+                .cluster_id = args.cluster,
+                .addresses = args.addresses.const_slice(),
+                .verbose = args.verbose,
+            },
         );
         defer repl_instance.deinit(allocator);
 

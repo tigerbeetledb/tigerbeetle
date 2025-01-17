@@ -91,10 +91,13 @@ class Client:
 
         self._inflight_packets: dict[int, InflightPacket] = {}
 
+        # ctypes needs a reference to keep this alive through the FFI call. Having it as a temporary
+        # within the call _does not_ work.
+        cluster_id_u128 = c_uint128.from_param(cluster_id)
         init_status = bindings.tb_client_init(
             ctypes.byref(self._client),
             ctypes.cast(
-                ctypes.byref(c_uint128.from_param(cluster_id)), ctypes.POINTER(ctypes.c_uint8 * 16)
+                ctypes.byref(cluster_id_u128), ctypes.POINTER(ctypes.c_uint8 * 16)
             ),
             replica_addresses.encode("ascii"),
             len(replica_addresses),

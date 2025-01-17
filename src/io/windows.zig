@@ -234,6 +234,7 @@ pub const IO = struct {
             timeout: struct {
                 deadline: u64,
             },
+            event: Overlapped,
         };
     };
 
@@ -1020,6 +1021,61 @@ pub const IO = struct {
                 }
             },
         );
+    }
+
+    pub const Event = u1;
+    pub const INVALID_EVENT: Event = 0;
+
+    pub fn open_event(
+        self: *IO,
+    ) !Event {
+        _ = self;
+        // Events on Windows don't need an identifier,
+        // they're handled just by the OVERLAPPED structure.
+        return INVALID_EVENT + 1;
+    }
+
+    pub fn event_listen(
+        self: *IO,
+        event: Event,
+        completion: *Completion,
+        comptime on_event: fn (*Completion) void,
+    ) void {
+        assert(event != INVALID_EVENT);
+        completion.* = .{
+            .next = null,
+            .context = null,
+            .operation = .{
+                .event = .{
+                    .raw = std.mem.zeroes(os.windows.OVERLAPPED),
+                    .completion = completion,
+                },
+            },
+            .callback = struct {
+                fn on_complete(ctx: Completion.Context) void {
+                    on_event(ctx.completion);
+                }
+            }.on_complete,
+        };
+
+        // Conceptually start listening by bumping the io_pending count.
+        self.io_pending += 1;
+    }
+
+    pub fn event_trigger(self: *IO, event: Event, completion: *Completion) void {
+        assert(event != INVALID_EVENT);
+        os.windows.PostQueuedCompletionStatus(
+            self.iocp,
+            undefined,
+            undefined,
+            &completion.operation.event.raw,
+        ) catch unreachable;
+    }
+
+    pub fn close_event(self: *IO, event: Event) void {
+        _ = self;
+        // Nothing to close as events are just intrusive OVERLAPPED structs.
+        assert(event != INVALID_EVENT);
     }
 
     pub const INVALID_SOCKET = os.windows.ws2_32.INVALID_SOCKET;

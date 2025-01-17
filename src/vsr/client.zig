@@ -12,7 +12,11 @@ const Message = @import("../message_pool.zig").MessagePool.Message;
 
 const log = stdx.log.scoped(.client);
 
-pub fn ClientType(comptime StateMachine_: type, comptime MessageBus: type) type {
+pub fn ClientType(
+    comptime StateMachine_: type,
+    comptime MessageBus: type,
+    comptime Time: type,
+) type {
     return struct {
         const Client = @This();
 
@@ -42,6 +46,8 @@ pub fn ClientType(comptime StateMachine_: type, comptime MessageBus: type) type 
         };
 
         message_bus: MessageBus,
+
+        time: Time,
 
         /// A universally unique identifier for the client (must not be zero).
         /// Used for routing replies back to the client via any network path (multi-path routing).
@@ -97,6 +103,10 @@ pub fn ClientType(comptime StateMachine_: type, comptime MessageBus: type) type 
         /// Used for end-to-end keepalive, and to discover a new primary between requests.
         ping_timeout: vsr.Timeout,
 
+        /// The round-trip time (estimated by the latest ping/pong pair) from each replica.
+        replica_round_trip_times_ns: [constants.replicas_max]?u64 =
+            .{null} ** constants.replicas_max,
+
         /// Used to calculate exponential backoff with random jitter.
         /// Seeded with the client's ID.
         prng: std.rand.DefaultPrng,
@@ -121,6 +131,7 @@ pub fn ClientType(comptime StateMachine_: type, comptime MessageBus: type) type 
                 id: u128,
                 cluster: u128,
                 replica_count: u8,
+                time: Time,
                 message_pool: *MessagePool,
                 message_bus_options: MessageBus.Options,
                 /// When eviction_callback is null, the client will panic on eviction.
@@ -148,6 +159,7 @@ pub fn ClientType(comptime StateMachine_: type, comptime MessageBus: type) type 
 
             var self = Client{
                 .message_bus = message_bus,
+                .time = options.time,
                 .id = options.id,
                 .cluster = options.cluster,
                 .replica_count = options.replica_count,
@@ -219,6 +231,7 @@ pub fn ClientType(comptime StateMachine_: type, comptime MessageBus: type) type 
             self.ticks += 1;
 
             self.message_bus.tick();
+            self.time.tick();
 
             self.ping_timeout.tick();
             self.request_timeout.tick();
@@ -439,6 +452,33 @@ pub fn ClientType(comptime StateMachine_: type, comptime MessageBus: type) type 
                 });
                 self.view = pong.header.view;
             }
+
+            const ping_timestamp_monotonic = pong.header.ping_timestamp_monotonic;
+            const pong_timestamp_monotonic = self.time.monotonic();
+            if (ping_timestamp_monotonic <= pong_timestamp_monotonic) {
+                self.replica_round_trip_times_ns[pong.header.replica] =
+                    pong_timestamp_monotonic - ping_timestamp_monotonic;
+
+                var round_trip_times_ns = stdx.BoundedArrayType(u64, constants.replicas_max){};
+                for (self.replica_round_trip_times_ns) |round_trip_time_ns| {
+                    if (round_trip_time_ns) |rtt_ns| {
+                        round_trip_times_ns.append_assume_capacity(rtt_ns);
+                    }
+                }
+                std.mem.sort(u64, round_trip_times_ns.slice(), {}, std.sort.asc(u64));
+                assert(round_trip_times_ns.count() > 0);
+
+                const rtt_median_ns =
+                    round_trip_times_ns.get(@divFloor(round_trip_times_ns.count(), 2));
+                self.request_timeout.set_rtt_ns(rtt_median_ns);
+            } else {
+                log.debug("{}: on_pong: monotonic timestamp regressed {}..{} replica={}", .{
+                    self.id,
+                    ping_timestamp_monotonic,
+                    pong_timestamp_monotonic,
+                    pong.header.replica,
+                });
+            }
         }
 
         fn on_reply(self: *Client, reply: *Message.Reply) void {
@@ -578,6 +618,7 @@ pub fn ClientType(comptime StateMachine_: type, comptime MessageBus: type) type 
                 .cluster = self.cluster,
                 .release = self.release,
                 .client = self.id,
+                .ping_timestamp_monotonic = self.time.monotonic(),
             };
 
             // TODO If we haven't received a pong from a replica since our last ping, then back off.

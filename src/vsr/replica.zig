@@ -1530,6 +1530,9 @@ pub fn ReplicaType(
             const m2 = self.clock.monotonic();
 
             self.clock.learn(message.header.replica, m0, t1, m2);
+            if (self.clock.round_trip_time_median_ns()) |rtt_ns| {
+                self.prepare_timeout.set_rtt_ns(rtt_ns);
+            }
         }
 
         /// Pings are used by clients to learn about the current view.
@@ -1545,6 +1548,7 @@ pub fn ReplicaType(
                 .replica = self.replica,
                 .view = self.view,
                 .release = self.release,
+                .ping_timestamp_monotonic = message.header.ping_timestamp_monotonic,
             }));
         }
 

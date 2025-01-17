@@ -332,6 +332,71 @@ test "timeout" {
     }.run_test();
 }
 
+test "event" {
+    try struct {
+        const Context = @This();
+
+        io: IO,
+        count: u32 = 0,
+        main_thread_id: std.Thread.Id,
+        event: IO.Event = IO.INVALID_EVENT,
+        event_completion: IO.Completion = undefined,
+
+        const delay = 5 * std.time.ns_per_ms;
+        const events_count = 5;
+
+        fn run_test() !void {
+            var self: Context = .{
+                .io = try IO.init(32, 0),
+                .main_thread_id = std.Thread.getCurrentId(),
+            };
+            defer self.io.deinit();
+
+            self.event = try self.io.open_event();
+            defer self.io.close_event(self.event);
+
+            var timer = Time{};
+            const start = timer.monotonic();
+
+            // Listen to the event and spawn a thread that triggers the completion after some time.
+            self.io.event_listen(self.event, &self.event_completion, on_event);
+            const thread = try std.Thread.spawn(.{}, Context.trigger_event, .{&self});
+
+            // Wait for the number of events to complete.
+            while (self.count < events_count) try self.io.tick();
+            thread.join();
+
+            // Make sure the event was triggered multiple times.
+            assert(self.count == events_count);
+
+            // Make sure at least some time has passed.
+            const elapsed = timer.monotonic() - start;
+            assert(elapsed >= delay);
+        }
+
+        fn trigger_event(self: *Context) void {
+            assert(std.Thread.getCurrentId() != self.main_thread_id);
+            while (self.count < events_count) {
+                std.time.sleep(delay + 1);
+
+                // Triggering the event:
+                self.io.event_trigger(self.event, &self.event_completion);
+            }
+        }
+
+        fn on_event(completion: *IO.Completion) void {
+            const self: *Context = @fieldParentPtr("event_completion", completion);
+            assert(std.Thread.getCurrentId() == self.main_thread_id);
+
+            self.count += 1;
+            if (self.count == events_count) return;
+
+            // Reattaching the event.
+            self.io.event_listen(self.event, &self.event_completion, on_event);
+        }
+    }.run_test();
+}
+
 test "submission queue full" {
     const ms = 20;
     const count = 10;

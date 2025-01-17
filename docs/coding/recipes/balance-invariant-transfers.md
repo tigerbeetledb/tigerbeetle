@@ -7,7 +7,7 @@ sidebar_position: 8
 For some accounts, it may be useful to enforce
 [`flags.debits_must_not_exceed_credits`](../../reference/account.md#flagsdebits_must_not_exceed_credits)
 or
-[`flags.credits_must_not_exceed_debits`](../../reference/account.md#flagscredits_must_not_exceed_debits).
+[`flags.credits_must_not_exceed_debits`](../../reference/account.md#flagscredits_must_not_exceed_debits)
 balance invariants for only a subset of all transfers, rather than all transfers.
 
 ## Per-transfer `credits_must_not_exceed_debits`

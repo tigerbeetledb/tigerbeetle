@@ -1939,27 +1939,14 @@ public class IntegrationTests
 
     private void ConcurrencyTest(bool isAsync)
     {
-        const int TASKS_QTY = 100_000;
-
         using var client = new Client(0, new[] { server.Address });
 
         var accounts = GenerateAccounts();
         var accountResults = client.CreateAccounts(accounts);
         Assert.IsTrue(accountResults.Length == 0);
 
-        var tasks = new Task<CreateTransferResult>[TASKS_QTY];
-
-        async Task<CreateTransferResult> asyncAction(Transfer transfer)
-        {
-            return await client.CreateTransferAsync(transfer);
-        }
-
-        CreateTransferResult syncAction(Transfer transfer)
-        {
-            return client.CreateTransfer(transfer);
-        }
-
-        for (int i = 0; i < TASKS_QTY; i++)
+        var tasks = new Task<CreateTransferResult>[isAsync ? 1_000_000 : 10_000];
+        for (int i = 0; i < tasks.Length; i++)
         {
             var transfer = new Transfer
             {
@@ -1973,11 +1960,10 @@ public class IntegrationTests
 
             // Starts multiple requests.
             // Wraps the syncAction into a Task for unified logic handling both async and sync tests.
-            tasks[i] = isAsync ? asyncAction(transfer) : Task.Run(() => syncAction(transfer));
+            tasks[i] = isAsync ? client.CreateTransferAsync(transfer) : Task.Run(() => client.CreateTransfer(transfer));
         }
 
         Task.WhenAll(tasks).Wait();
-
         Assert.IsTrue(tasks.All(x => x.Result == CreateTransferResult.Ok));
 
         var lookupAccounts = client.LookupAccounts(new[] { accounts[0].Id, accounts[1].Id });
@@ -1985,11 +1971,11 @@ public class IntegrationTests
 
         // Assert that all tasks ran to the conclusion
 
-        Assert.AreEqual(lookupAccounts[0].CreditsPosted, (uint)TASKS_QTY);
+        Assert.AreEqual(lookupAccounts[0].CreditsPosted, (uint)tasks.Length);
         Assert.AreEqual(lookupAccounts[0].DebitsPosted, 0LU);
 
         Assert.AreEqual(lookupAccounts[1].CreditsPosted, 0LU);
-        Assert.AreEqual(lookupAccounts[1].DebitsPosted, (uint)TASKS_QTY);
+        Assert.AreEqual(lookupAccounts[1].DebitsPosted, (uint)tasks.Length);
     }
 
     /// <summary>

@@ -539,7 +539,7 @@ pub fn ManifestLevelType(
 
         /// The function is only used for verification; it is not performance-critical.
         pub fn contains(level: ManifestLevel, table: *const TableInfo) bool {
-            assert(constants.verify);
+            comptime assert(constants.verify);
             var level_tables = level.iterator(.visible, &.{
                 table.snapshot_min,
             }, .ascending, KeyRange{

@@ -1,6 +1,8 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
-const Atomic = std.atomic.Value;
+
+const FIFOType = @import("../tb_client.zig").vsr.fifo.FIFOType;
 
 pub const Packet = extern struct {
     next: ?*Packet,
@@ -31,31 +33,33 @@ pub const Packet = extern struct {
         invalid_data_size,
     };
 
-    /// Thread-safe stack optimized for 1 consumer (io thread) and N producers (client threads),
-    /// `push` uses a spin lock, and `pop` is not thread-safe.
-    pub const SubmissionStack = struct {
-        pushed: Atomic(?*Packet) = Atomic(?*Packet).init(null),
-        popped: ?*Packet = null,
+    /// Thread-safe FIFO.
+    pub const SubmissionQueue = struct {
+        fifo: FIFOType(Packet) = .{
+            .name = null,
+            .verify_push = builtin.is_test,
+        },
+        mutex: std.Thread.Mutex = .{},
 
-        pub fn push(self: *SubmissionStack, packet: *Packet) void {
-            var pushed = self.pushed.load(.monotonic);
-            while (true) {
-                packet.next = pushed;
-                pushed = self.pushed.cmpxchgWeak(
-                    pushed,
-                    packet,
-                    .release,
-                    .monotonic,
-                ) orelse break;
-            }
+        pub fn push(self: *SubmissionQueue, packet: *Packet) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            self.fifo.push(packet);
         }
 
-        pub fn pop(self: *SubmissionStack) ?*Packet {
-            if (self.popped == null) self.popped = self.pushed.swap(null, .acquire);
-            const packet = self.popped orelse return null;
-            self.popped = packet.next;
-            packet.next = null;
-            return packet;
+        pub fn pop(self: *SubmissionQueue) ?*Packet {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            return self.fifo.pop();
+        }
+
+        pub fn empty(self: *SubmissionQueue) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            return self.fifo.count == 0;
         }
     };
 };

@@ -403,7 +403,8 @@ pub const Header = extern struct {
         reserved_frame: [12]u8 = [_]u8{0} ** 12,
 
         client: u128,
-        reserved: [112]u8 = [_]u8{0} ** 112,
+        ping_timestamp_monotonic: u64,
+        reserved: [104]u8 = [_]u8{0} ** 104,
 
         fn invalid_header(self: *const @This()) ?[]const u8 {
             assert(self.command == .ping_client);
@@ -436,7 +437,8 @@ pub const Header = extern struct {
         replica: u8,
         reserved_frame: [12]u8 = [_]u8{0} ** 12,
 
-        reserved: [128]u8 = [_]u8{0} ** 128,
+        ping_timestamp_monotonic: u64,
+        reserved: [120]u8 = [_]u8{0} ** 120,
 
         fn invalid_header(self: *const @This()) ?[]const u8 {
             assert(self.command == .pong_client);

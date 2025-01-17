@@ -1371,7 +1371,7 @@ pub fn GridType(comptime Storage: type) type {
         }
 
         fn verify_read(grid: *Grid, address: u64, cached_block: BlockPtrConst) void {
-            assert(constants.verify);
+            comptime assert(constants.verify);
 
             const TestStorage = @import("../testing/storage.zig").Storage;
             if (Storage != TestStorage) return;

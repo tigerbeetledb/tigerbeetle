@@ -21,7 +21,7 @@ pub const Time = struct {
     /// which the jumps occur. A is the amplitude of the step.
     /// Non-ideal is similar to periodic except the phase is adjusted using a random number taken
     /// from a normal distribution with mean=0, stddev=10. Finally, a random offset (up to
-    /// offset_coefficientC) is added to the result.
+    /// offset_coefficient_C) is added to the result.
     offset_coefficient_A: i64,
     offset_coefficient_B: i64,
     offset_coefficient_C: u32 = 0,

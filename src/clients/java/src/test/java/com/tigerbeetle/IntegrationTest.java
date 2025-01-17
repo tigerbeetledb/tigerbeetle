@@ -10,8 +10,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -1292,15 +1290,11 @@ public class IntegrationTest {
     }
 
     /**
-     * This test asserts that async tasks will respect client's concurrencyMax.
+     * This test asserts that async calls will not block.
      */
     @Test
     public void testAsyncTasks() throws Throwable {
         final int TASKS_COUNT = 1_000_000;
-        final int CONCURRENCY_MAX = 8192;
-        final var semaphore = new Semaphore(CONCURRENCY_MAX);
-
-        final var executor = Executors.newFixedThreadPool(4);
 
         try (final var client = new Client(clusterId, new String[] {server.getAddress()})) {
 
@@ -1325,11 +1319,7 @@ public class IntegrationTest {
                 transfers.setAmount(100);
 
                 // Starting async batch.
-                semaphore.acquire();
-                tasks[i] = client.createTransfersAsync(transfers).thenApplyAsync((result) -> {
-                    semaphore.release();
-                    return result;
-                }, executor);
+                tasks[i] = client.createTransfersAsync(transfers);
             }
 
             // Wait for all tasks.
@@ -1389,14 +1379,18 @@ public class IntegrationTest {
             barrier.await();
 
             // Interrupt all threads.
-            for (int i = 0; i < TASKS_COUNT; i++) {
-                tasks[i].interrupt();
-                tasks[i].join();
+            for (final var task : tasks) {
+                task.interrupt();
+                task.join();
 
-                assertTrue(tasks[i].getState() == Thread.State.TERMINATED);
-                assertTrue(tasks[i].result == null);
-                assertTrue(tasks[i].exception instanceof AssertionError);
-                assertTrue(tasks[i].exception.getCause() instanceof InterruptedException);
+                assertTrue(task.getState() == Thread.State.TERMINATED);
+                assertTrue(task.result == null);
+                assertTrue(task.exception != null);
+                assertTrue(task.exception instanceof InterruptedException ||
+                // TODO: Interrupted operations throw unchecked `AssertionError`.
+                // We should change the client API adding `throws InterruptedException` instead.
+                        (task.exception instanceof AssertionError
+                                && task.exception.getCause() instanceof InterruptedException));
             }
         }
     }
@@ -2333,13 +2327,9 @@ public class IntegrationTest {
             try {
                 enterBarrier.countDown();
                 enterBarrier.await();
-                try {
-                    result = client.createTransfers(transfers);
-                } catch (Throwable any) {
-                    exception = any;
-                }
-            } catch (InterruptedException interruptedException) {
-                return;
+                result = client.createTransfers(transfers);
+            } catch (Throwable any) {
+                exception = any;
             } finally {
                 exitBarrier.countDown();
             }

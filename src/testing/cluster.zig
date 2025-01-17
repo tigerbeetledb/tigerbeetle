@@ -59,14 +59,8 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
 
         pub const MessageBus = @import("cluster/message_bus.zig").MessageBus;
         pub const StateMachine = StateMachineType(Storage, constants.state_machine_config);
-        pub const Replica = vsr.ReplicaType(
-            StateMachine,
-            MessageBus,
-            Storage,
-            TimePointer,
-            AOF,
-        );
-        pub const Client = vsr.ClientType(StateMachine, MessageBus);
+        pub const Replica = vsr.ReplicaType(StateMachine, MessageBus, Storage, TimePointer, AOF);
+        pub const Client = vsr.ClientType(StateMachine, MessageBus, Time);
         pub const StateChecker = StateCheckerType(Client, Replica);
         pub const ManifestChecker = ManifestCheckerType(StateMachine.Forest);
 
@@ -288,6 +282,12 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
                         .id = client_id_permutation.encode(i + client_id_permutation_shift),
                         .cluster = options.cluster_id,
                         .replica_count = options.replica_count,
+                        .time = .{
+                            .resolution = constants.tick_ms * std.time.ns_per_ms,
+                            .offset_type = .linear,
+                            .offset_coefficient_A = 0,
+                            .offset_coefficient_B = 0,
+                        },
                         .message_pool = &client_pools[i],
                         .message_bus_options = .{ .network = network },
                         .eviction_callback = client_on_eviction,

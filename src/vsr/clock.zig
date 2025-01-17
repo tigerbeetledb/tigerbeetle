@@ -83,7 +83,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const fmt = std.fmt;
 
-const log = @import("../stdx.zig").log.scoped(.clock);
+const stdx = @import("../stdx.zig");
+const log = stdx.log.scoped(.clock);
 const constants = @import("../constants.zig");
 
 const clock_offset_tolerance_max: u64 =
@@ -315,8 +316,7 @@ pub fn ClockType(comptime Time: type) type {
                 clock_offset_corrected,
             });
 
-            // The less network delay, the more likely we have an accurante clock offset
-            // measurement:
+            // The less network delay, the more likely we have an accurate clock offset measurement:
             self.window.sources[replica] = minimum_one_way_delay(
                 self.window.sources[replica],
                 Sample{
@@ -365,6 +365,27 @@ pub fn ClockType(comptime Time: type) type {
                 );
             } else {
                 return null;
+            }
+        }
+
+        pub fn round_trip_time_median_ns(self: *const Clock) ?u64 {
+            // +1 to allow for the standby.
+            var one_way_delays = stdx.BoundedArrayType(u64, constants.replicas_max + 1){};
+            for (self.window.sources, 0..) |source, replica_index| {
+                if (self.replica != replica_index) {
+                    if (source) |sampled| {
+                        one_way_delays.append_assume_capacity(sampled.one_way_delay);
+                    }
+                }
+            }
+
+            if (one_way_delays.count() < self.quorum) {
+                return null;
+            } else {
+                std.mem.sort(u64, one_way_delays.slice(), {}, std.sort.asc(u64));
+                const one_way_delay_median =
+                    one_way_delays.get(@divFloor(one_way_delays.count(), 2));
+                return one_way_delay_median * 2;
             }
         }
 

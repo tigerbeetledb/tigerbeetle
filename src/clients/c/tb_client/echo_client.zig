@@ -10,12 +10,16 @@ const constants = vsr.constants;
 const MessagePool = vsr.message_pool.MessagePool;
 const Message = MessagePool.Message;
 
-pub fn EchoClientType(comptime StateMachine_: type, comptime MessageBus: type) type {
+pub fn EchoClientType(
+    comptime StateMachine_: type,
+    comptime MessageBus: type,
+    comptime Time: type,
+) type {
     return struct {
         const EchoClient = @This();
 
         // Exposing the same types the real client does:
-        const VSRClient = vsr.ClientType(StateMachine_, MessageBus);
+        const VSRClient = vsr.ClientType(StateMachine_, MessageBus, Time);
         pub const StateMachine = VSRClient.StateMachine;
         pub const Request = VSRClient.Request;
 
@@ -61,6 +65,7 @@ pub fn EchoClientType(comptime StateMachine_: type, comptime MessageBus: type) t
                 id: u128,
                 cluster: u128,
                 replica_count: u8,
+                time: Time,
                 message_pool: *MessagePool,
                 message_bus_options: MessageBus.Options,
                 eviction_callback: ?*const fn (
@@ -230,7 +235,8 @@ test "Echo Demuxer" {
         constants.state_machine_config,
     );
     const MessageBus = vsr.message_bus.MessageBusClient;
-    const Client = EchoClientType(StateMachine, MessageBus);
+    const Time = vsr.time.Time;
+    const Client = EchoClientType(StateMachine, MessageBus, Time);
 
     var prng = std.rand.DefaultPrng.init(42);
     inline for ([_]StateMachine.Operation{

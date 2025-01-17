@@ -222,7 +222,7 @@ pub fn CacheMapType(
         pub fn remove(self: *CacheMap, key: Key) void {
             // The only thing that tests this in any depth is the cache_map fuzz itself.
             // Make sure we aren't being called in regular code without another once over.
-            assert(constants.verify);
+            comptime assert(constants.verify);
 
             const cache_removed: ?Value = if (self.cache) |*cache|
                 cache.remove(key)

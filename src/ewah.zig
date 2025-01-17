@@ -158,7 +158,7 @@ pub fn ewah(comptime Word: type) type {
         /// Decodes the compressed bitset in `source` into `target_words`.
         /// Returns the number of *words* written to `target_words`.
         pub fn decode_all(source: []align(@alignOf(Word)) const u8, target_words: []Word) usize {
-            assert(constants.verify);
+            comptime assert(constants.verify);
             assert(source.len % @sizeOf(Word) == 0);
             assert(disjoint_slices(u8, Word, source, target_words));
 
@@ -277,7 +277,7 @@ pub fn ewah(comptime Word: type) type {
         // (This is a helper for testing only.)
         // Returns the number of bytes written to `target`.
         pub fn encode_all(source_words: []const Word, target: []align(@alignOf(Word)) u8) usize {
-            assert(constants.verify);
+            comptime assert(constants.verify);
             assert(target.len == encode_size_max(source_words.len));
             assert(disjoint_slices(Word, u8, source_words, target));
 

@@ -1,6 +1,6 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
-const Atomic = std.atomic.Value;
 
 // When referenced from unit_test.zig, there is no vsr import module so use path.
 const vsr = if (@import("root") == @This()) @import("vsr") else @import("../../../vsr.zig");
@@ -105,13 +105,12 @@ pub fn ContextType(
         completion_fn: tb_completion_t,
         implementation: ContextImplementation,
 
-        canceled: bool,
-        evicted: ?vsr.Header.Eviction.Reason,
+        submitted: Packet.SubmissionQueue,
+        pending: FIFOType(Packet),
 
         signal: Signal,
-        submitted: Packet.SubmissionStack,
-        pending: FIFOType(Packet),
-        shutdown: Atomic(bool),
+        canceled: bool,
+        evicted: ?vsr.Header.Eviction.Reason,
         thread: std.Thread,
 
         pub fn init(
@@ -174,6 +173,7 @@ pub fn ContextType(
                     .id = context.client_id,
                     .cluster = cluster_id,
                     .replica_count = context.addresses.count_as(u8),
+                    .time = .{},
                     .message_pool = &context.message_pool,
                     .message_bus_options = .{
                         .configuration = context.addresses.const_slice(),
@@ -202,8 +202,10 @@ pub fn ContextType(
             };
 
             context.submitted = .{};
-            context.shutdown = Atomic(bool).init(false);
-            context.pending = .{ .name = null };
+            context.pending = .{
+                .name = null,
+                .verify_push = builtin.is_test,
+            };
             context.canceled = false;
             context.evicted = null;
 
@@ -233,16 +235,11 @@ pub fn ContextType(
             return context;
         }
 
-        pub fn deinit(self: *Context) !void {
-            // Only one thread calls deinit() and it's UB for any further Context interaction.
-            const already_shutdown = self.shutdown.swap(true, .release);
-            assert(!already_shutdown);
-
-            // Wake up the run() thread for it to observe shutdown=true, cancel inflight/pending
-            // packets, and finish running.
-            self.signal.notify();
+        /// Only one thread calls `deinit()`.
+        /// Since it frees the Context, any further interaction is undefined behavior.
+        pub fn deinit(self: *Context) void {
+            self.signal.stop();
             self.thread.join();
-
             self.io.cancel_all();
 
             self.signal.deinit();
@@ -267,7 +264,6 @@ pub fn ContextType(
         fn client_eviction_callback(client: *Client, eviction: *const Message.Eviction) void {
             const self: *Context = @fieldParentPtr("client", client);
             assert(self.evicted == null);
-
             log.debug("{}: client_eviction_callback: reason={?s} reason_int={}", .{
                 self.client_id,
                 std.enums.tagName(vsr.Header.Eviction.Reason, eviction.header.reason),
@@ -278,14 +274,13 @@ pub fn ContextType(
             self.cancel_all();
         }
 
-        pub fn tick(self: *Context) void {
+        fn tick(self: *Context) void {
             if (self.evicted == null) {
                 self.client.tick();
             }
         }
-
         pub fn run(self: *Context) void {
-            while (!self.shutdown.load(.acquire)) {
+            while (!self.signal.stop_requested()) {
                 self.tick();
                 self.io.run_for_ns(constants.tick_ms * std.time.ns_per_ms) catch |err| {
                     log.err("{}: IO.run() failed: {s}", .{
@@ -308,8 +303,26 @@ pub fn ContextType(
                 return;
             }
 
-            while (self.submitted.pop()) |packet| {
+            // Prevents IO thread starvation under heavy client load.
+            // Process only the minimal number of packets for the next pending request.
+            const enqueued_count = self.pending.count;
+            const safety_limit = 8 * 1024; // Avoid unbounded loop in case of invalid packets.
+            for (0..safety_limit) |_| {
+                const packet = self.submitted.pop() orelse return;
                 self.request(packet);
+
+                // Packets can be processed without increasing `pending.count`:
+                // - If the packet is invalid.
+                // - If there's no in-flight request, the packet is sent immediately without
+                //   using the pending queue.
+                // - If the packet can be batched with another previously enqueued packet.
+                if (self.pending.count > enqueued_count) break;
+            }
+
+            // Defer this work to later,
+            // allowing the IO thread to remain free for processing completions.
+            if (!self.submitted.empty()) {
+                self.signal.notify();
             }
         }
 
@@ -368,9 +381,8 @@ pub fn ContextType(
                 packet.data,
                 packet.data_size,
             );
-
             // Avoid making a packet inflight by cancelling it if the client was shutdown.
-            if (self.shutdown.load(.acquire)) {
+            if (self.signal.stop_requested()) {
                 return self.cancel(packet);
             }
 
@@ -439,11 +451,9 @@ pub fn ContextType(
 
         fn submit(self: *Context, packet: *Packet) void {
             assert(self.client.request_inflight == null);
-
             // On shutdown, cancel this packet as well as any others batched onto it.
-            if (self.shutdown.load(.acquire)) {
-                self.cancel(packet);
-                return;
+            if (self.signal.stop_requested()) {
+                return self.cancel(packet);
             }
 
             const message = self.client.get_message().build(.request);
@@ -577,8 +587,10 @@ pub fn ContextType(
         fn cancel(self: *Context, packet: *Packet) void {
             const result = if (self.evicted) |reason|
                 client_eviction_error(reason)
-            else
-                error.ClientShutdown;
+            else reason: {
+                assert(self.signal.stop_requested());
+                break :reason error.ClientShutdown;
+            };
 
             var it: ?*Packet = packet;
             while (it) |batched| {
@@ -646,9 +658,7 @@ pub fn ContextType(
                 .reserved = [_]u8{0} ** 7,
             };
             const self = get_context(implementation);
-
-            const already_shutdown = self.shutdown.load(.acquire);
-            assert(!already_shutdown);
+            assert(!self.signal.stop_requested());
 
             self.submitted.push(packet);
             self.signal.notify();
@@ -656,9 +666,7 @@ pub fn ContextType(
 
         fn on_deinit(implementation: *ContextImplementation) void {
             const self = get_context(implementation);
-            self.deinit() catch |err| {
-                std.debug.panic("deinit error: {}", .{err});
-            };
+            self.deinit();
         }
 
         test "client_batch_linked_chain" {

@@ -1367,6 +1367,76 @@ pub const IO = struct {
         self.enqueue(completion);
     }
 
+    pub const Event = posix.fd_t;
+    pub const INVALID_EVENT: Event = -1;
+
+    pub fn open_event(self: *IO) !Event {
+        _ = self;
+
+        // eventfd initialized with no (zero) previous write value.
+        const event_fd = posix.eventfd(0, linux.EFD.CLOEXEC) catch |err| switch (err) {
+            error.SystemResources,
+            error.SystemFdQuotaExceeded,
+            error.ProcessFdQuotaExceeded,
+            => return error.SystemResources,
+            error.Unexpected => return error.Unexpected,
+        };
+        assert(event_fd != INVALID_EVENT);
+        errdefer os.close(event_fd);
+
+        return event_fd;
+    }
+
+    pub fn event_listen(
+        self: *IO,
+        event: Event,
+        completion: *Completion,
+        comptime on_event: fn (*Completion) void,
+    ) void {
+        assert(event != INVALID_EVENT);
+        const Context = struct {
+            const Context = @This();
+            var buffer: u64 = undefined;
+
+            fn on_read(
+                _: *Context,
+                completion_inner: *Completion,
+                result: ReadError!usize,
+            ) void {
+                const bytes = result catch unreachable; // eventfd reads should not fail.
+                assert(bytes == @sizeOf(u64));
+                on_event(completion_inner);
+            }
+        };
+
+        self.read(
+            *Context,
+            undefined,
+            Context.on_read,
+            completion,
+            event,
+            std.mem.asBytes(&Context.buffer),
+            0, // eventfd reads must always start from 0 offset.
+        );
+    }
+
+    pub fn event_trigger(self: *IO, event: Event, completion: *Completion) void {
+        assert(event != INVALID_EVENT);
+        _ = self;
+        _ = completion;
+
+        const value: u64 = 1;
+        const bytes = posix.write(event, std.mem.asBytes(&value)) catch unreachable;
+        assert(bytes == @sizeOf(u64));
+    }
+
+    pub fn close_event(self: *IO, event: Event) void {
+        assert(event != INVALID_EVENT);
+        _ = self;
+
+        posix.close(event);
+    }
+
     pub const INVALID_SOCKET = -1;
 
     /// Creates a socket that can be used for async operations with the IO instance.

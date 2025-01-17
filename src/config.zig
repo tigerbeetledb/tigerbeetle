@@ -117,6 +117,7 @@ const ConfigProcess = struct {
     client_request_completion_warn_ms: u64 = 200,
     tick_ms: u63 = 10,
     rtt_ms: u64 = 300,
+    rtt_max_ms: u64 = 1000 * 60,
     rtt_multiple: u8 = 2,
     backoff_min_ms: u64 = 100,
     backoff_max_ms: u64 = 10000,

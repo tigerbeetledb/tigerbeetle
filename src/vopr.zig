@@ -761,17 +761,18 @@ pub const Simulator = struct {
                     // as commit progress depends on them. Then, check prepares between
                     // [op_repair_min, commit_min] as view changing replicas cannot step up as
                     // primary unless they have all prepares intact.
-                    if (simulator.smallest_missing_prepare_between(
-                        &replica,
-                        replica.commit_min + 1,
-                        commit_max,
-                    )) |op| {
-                        if (missing_prepare_op == null or op < missing_prepare_op.?) {
-                            missing_prepare_op = op;
-                            continue;
+                    if (replica.commit_min < commit_max) {
+                        if (simulator.smallest_missing_prepare_between(
+                            &replica,
+                            replica.commit_min + 1,
+                            commit_max,
+                        )) |op| {
+                            if (missing_prepare_op == null or op < missing_prepare_op.?) {
+                                missing_prepare_op = op;
+                                continue;
+                            }
                         }
                     }
-
                     if (simulator.smallest_missing_prepare_between(
                         &replica,
                         op_repair_min,
