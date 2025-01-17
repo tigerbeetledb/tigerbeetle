@@ -133,7 +133,11 @@ pub const StorageChecker = struct {
         const bar_beat_count = constants.lsm_compaction_ops;
         if ((replica.commit_min + 1) % bar_beat_count != 0) return;
 
-        const checksum = checker.checksum_grid(Replica, replica, .free_set_from_memory);
+        const checksum = checker.checksum_grid(
+            @TypeOf(replica.state_machine.forest),
+            &replica.state_machine.forest,
+            .free_set_from_memory,
+        );
         log.debug("{?}: replica_compact: op={} area=grid checksum={x:0>32}", .{
             superblock.replica_index,
             replica.commit_min,
@@ -165,8 +169,8 @@ pub const StorageChecker = struct {
         const syncing = replica.superblock.working.vsr_state.sync_op_max > 0;
         try checker.check(
             "replica_checkpoint",
-            Replica,
-            replica,
+            @TypeOf(replica.state_machine.forest),
+            &replica.state_machine.forest,
             std.enums.EnumSet(CheckpointArea).init(.{
                 .superblock_checkpoint = true,
                 .client_replies = !syncing,
@@ -185,8 +189,8 @@ pub const StorageChecker = struct {
     ) !void {
         try checker.check(
             "replica_sync",
-            Replica,
-            replica,
+            @TypeOf(replica.state_machine.forest),
+            &replica.state_machine.forest,
             std.enums.EnumSet(CheckpointArea).init(.{
                 .superblock_checkpoint = true,
                 // The replica may have have already committed some additional prepares atop the
@@ -200,11 +204,13 @@ pub const StorageChecker = struct {
     fn check(
         checker: *StorageChecker,
         caller: []const u8,
-        comptime Replica: type,
-        replica: *const Replica,
+        comptime Forest: type,
+        forest: *const Forest,
         areas: std.enums.EnumSet(CheckpointArea),
     ) !void {
-        const superblock: *const SuperBlock = &replica.superblock;
+        const superblock: *const SuperBlock = forest.grid.superblock;
+        const op_checkpoint = superblock.working.vsr_state.checkpoint.header.op;
+
         const checkpoint_actual = checkpoint: {
             var checkpoint = Checkpoint.init(.{
                 .superblock_checkpoint = null,
@@ -221,22 +227,22 @@ pub const StorageChecker = struct {
                 checkpoint.put(.client_replies, checker.checksum_client_replies(superblock));
             }
             if (areas.contains(.grid)) {
-                checkpoint.put(.grid, checker.checksum_grid(Replica, replica, .free_set_from_disk));
+                checkpoint.put(.grid, checker.checksum_grid(Forest, forest, .free_set_from_disk));
             }
             break :checkpoint checkpoint;
         };
 
         for (std.enums.values(CheckpointArea)) |area| {
             log.debug("{}: {s}: checkpoint={} area={s} value={?x:0>32}", .{
-                replica.replica,
+                superblock.replica_index.?,
                 caller,
-                replica.op_checkpoint(),
+                op_checkpoint,
                 @tagName(area),
                 checkpoint_actual.get(area),
             });
         }
 
-        if (checker.checkpoints.getPtr(replica.op_checkpoint())) |checkpoint_expect| {
+        if (checker.checkpoints.getPtr(op_checkpoint)) |checkpoint_expect| {
             var mismatch: bool = false;
             for (std.enums.values(CheckpointArea)) |area| {
                 const checksum_actual = checkpoint_actual.get(area) orelse continue;
@@ -244,7 +250,7 @@ pub const StorageChecker = struct {
                     if (checksum_expect != checksum_actual) {
                         log.warn("{}: {s}: mismatch " ++
                             "area={s} expect={x:0>32} actual={x:0>32}", .{
-                            replica.replica,
+                            superblock.replica_index.?,
                             caller,
                             @tagName(area),
                             checksum_expect,
@@ -259,7 +265,7 @@ pub const StorageChecker = struct {
         } else {
             // This replica is the first to reach op_checkpoint.
             // Save its state for other replicas to check themselves against.
-            try checker.checkpoints.putNoClobber(replica.op_checkpoint(), checkpoint_actual);
+            try checker.checkpoints.putNoClobber(op_checkpoint, checkpoint_actual);
         }
     }
 
@@ -368,14 +374,14 @@ pub const StorageChecker = struct {
 
     fn checksum_grid(
         checker: *StorageChecker,
-        comptime Replica: type,
-        replica: *const Replica,
+        comptime Forest: type,
+        forest: *const Forest,
         source: enum { free_set_from_disk, free_set_from_memory },
     ) u128 {
-        const superblock: *const SuperBlock = &replica.superblock;
-        const manifest_log = &replica.state_machine.forest.manifest_log;
+        const superblock: *const SuperBlock = forest.grid.superblock;
+        const manifest_log = &forest.manifest_log;
         const free_set = switch (source) {
-            .free_set_from_memory => replica.grid.free_set,
+            .free_set_from_memory => forest.grid.free_set,
             .free_set_from_disk => blk: {
                 checker.read_free_set_bitset(superblock, .blocks_acquired);
                 checker.read_free_set_bitset(superblock, .blocks_released);
@@ -419,7 +425,7 @@ pub const StorageChecker = struct {
             } else {
                 const block = superblock.storage.grid_block(block_address) orelse {
                     log.err("{}: checksum_grid: missing block_address={}", .{
-                        replica.replica,
+                        superblock.replica_index.?,
                         block_address,
                     });
 

@@ -4312,25 +4312,21 @@ pub fn ReplicaType(
 
         fn commit_checkpoint_durable(self: *Replica) enum { ready, pending } {
             assert(self.commit_stage == .checkpoint_durable);
+            if (self.grid.free_set.checkpoint_durable) return .ready;
+            if (!vsr.Checkpoint.durable(self.op_checkpoint(), self.commit_min)) return .ready;
 
-            if (!self.grid.free_set.checkpoint_durable and
-                vsr.Checkpoint.durable(self.op_checkpoint(), self.commit_min))
-            {
-                // Checkpoint is guaranteed to be durable on a commit quorum when a replica is
-                // committing the (pipeline + 1)ᵗʰ prepare after checkpoint trigger. It might
-                // already be durable before this point (some part of the cluster may be lagging
-                // while a commit quorum may already be on the next checkpoint), but it is crucial
-                // for storage determinism that each replica marks it as durable at the same time.
-                if (vsr.Checkpoint.trigger_for_checkpoint(self.op_checkpoint())) |trigger| {
-                    assert(self.commit_min == trigger + constants.pipeline_prepare_queue_max + 1);
-                }
-
-                self.grid_scrubber.checkpoint_durable();
-                self.grid.checkpoint_durable(commit_checkpoint_durable_grid_callback);
-                return .pending;
-            } else {
-                return .ready;
+            // Checkpoint is guaranteed to be durable on a commit quorum when a replica is
+            // committing the (pipeline + 1)ᵗʰ prepare after checkpoint trigger. It might already be
+            // durable before this point (some part of the cluster may be lagging while a commit
+            // quorum may already be on the next checkpoint), but it is crucial for storage
+            // determinism that each replica marks it as durable at the same time.
+            if (vsr.Checkpoint.trigger_for_checkpoint(self.op_checkpoint())) |trigger| {
+                assert(self.commit_min == trigger + constants.pipeline_prepare_queue_max + 1);
             }
+
+            self.grid_scrubber.checkpoint_durable();
+            self.grid.checkpoint_durable(commit_checkpoint_durable_grid_callback);
+            return .pending;
         }
 
         fn commit_checkpoint_data(self: *Replica) enum { ready, pending } {
