@@ -365,7 +365,7 @@ pub fn WorkloadType(comptime AccountingStateMachine: type) type {
                     switch (action) {
                         .create_accounts => {
                             const batchable = self.batch(tb.Account, action, encoder.writable());
-                            if (!encoder.can_add(batchable.len * event_size)) break;
+                            if (encoder.writable().len < batchable.len * event_size) break;
 
                             const count = self.build_create_accounts(
                                 client_index,
@@ -377,7 +377,7 @@ pub fn WorkloadType(comptime AccountingStateMachine: type) type {
                         },
                         .create_transfers => {
                             const batchable = self.batch(tb.Transfer, action, encoder.writable());
-                            if (!encoder.can_add(batchable.len * event_size)) break;
+                            if (encoder.writable().len < batchable.len * event_size) break;
 
                             const count = self.build_create_transfers(
                                 client_index,
@@ -389,7 +389,7 @@ pub fn WorkloadType(comptime AccountingStateMachine: type) type {
                         },
                         .lookup_accounts => {
                             const batchable = self.batch(u128, action, encoder.writable());
-                            if (!encoder.can_add(batchable.len * event_size)) break;
+                            if (encoder.writable().len < batchable.len * event_size) break;
 
                             const count = self.build_lookup_accounts(batchable);
                             assert(count <= batchable.len);
@@ -398,7 +398,7 @@ pub fn WorkloadType(comptime AccountingStateMachine: type) type {
                         },
                         .lookup_transfers => {
                             const batchable = self.batch(u128, action, encoder.writable());
-                            if (!encoder.can_add(batchable.len * event_size)) break;
+                            if (encoder.writable().len < batchable.len * event_size) break;
 
                             const count = self.build_lookup_transfers(batchable);
                             assert(count <= batchable.len);

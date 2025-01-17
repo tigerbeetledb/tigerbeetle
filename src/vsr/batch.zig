@@ -178,11 +178,6 @@ pub const BatchEncoder = struct {
             &.{};
     }
 
-    pub fn can_add(self: *const BatchEncoder, bytes_written: usize) bool {
-        assert(constants.verify); // Used only by tests.
-        return self.writable().len >= bytes_written;
-    }
-
     pub fn add(self: *BatchEncoder, bytes_written: usize) void {
         assert(self.buffer != null);
         assert(bytes_written % self.element_size == 0);
@@ -316,7 +311,7 @@ const test_batch = struct {
                 ) * options.element_size;
             };
 
-            try testing.expect(encoder.can_add(bytes_written));
+            try testing.expect(encoder.writable().len >= bytes_written);
 
             const slice = encoder.writable();
             @memset(std.mem.bytesAsSlice(u16, slice[0..bytes_written]), @intCast(index));
@@ -472,7 +467,7 @@ test "batch: invalid format" {
     var event_total_count: usize = 0;
     for (0..batch_count) |_| {
         const event_count = random.intRangeAtMostBiased(usize, 0, 100);
-        try testing.expect(encoder.can_add(element_size * event_count));
+        try testing.expect(encoder.writable().len >= element_size * event_count);
         encoder.add(element_size * event_count);
         event_total_count += event_count;
     }
