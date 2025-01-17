@@ -130,6 +130,7 @@ jobs:
           - { os: 'macos-latest',   language: 'go',      language_version: '1.21'  }
           - { os: 'macos-latest',   language: 'node',    language_version: '20.x'  }
           - { os: 'macos-latest',   language: 'python',  language_version: '3.13'  }
+          - { os: 'macos-latest',   language: 'python',  language_version: '3.8'  }
 
           - { os: 'macos-13',       language: 'go',      language_version: '1.21'  }
           - { os: 'macos-13',       language: 'node',    language_version: '20.x'  }
