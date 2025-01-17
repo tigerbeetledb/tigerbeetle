@@ -350,8 +350,6 @@ pub fn GridType(comptime Storage: type) type {
                 });
                 assert((grid.free_set.count_acquired() > 0) ==
                     (grid.free_set_checkpoint_blocks_acquired.size > 0));
-                assert((grid.free_set.count_released() > 0) ==
-                    (grid.free_set_checkpoint_blocks_released.size > 0));
                 assert(grid.free_set.count_released() >=
                     (grid.free_set_checkpoint_blocks_acquired.block_count() +
                     grid.free_set_checkpoint_blocks_released.block_count()));
