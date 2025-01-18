@@ -926,3 +926,5 @@ export enum Operation {
   query_transfers = 136,
 }
 
+export type Architecture = 'arm64' | 'x64';
+export type Platform = 'linux' | 'darwin' | 'win32';

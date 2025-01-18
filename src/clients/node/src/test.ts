@@ -13,6 +13,7 @@ import {
   id,
   QueryFilter,
   QueryFilterFlags,
+  validateReplicaAddresses,
 } from '.'
 
 const client = createClient({
@@ -59,6 +60,62 @@ function test(name: string, fn: () => Promise<void>) {
 test.skip = (name: string, fn: () => Promise<void>) => {
   console.log(name + ': SKIPPED')
 }
+
+test('validateReplicaAddresses handles various address formats', async (): Promise<void> => {
+  const validAddresses = [
+    '127.0.0.1:3000',
+    '192.168.0.1:8080',
+    '0.0.0.0:80',
+    '255.255.255.255:65535',
+    3000,
+    '3000',
+    'localhost',
+    'localhost:3000',
+    '192.168.0.1:1',
+    '192.168.0.1:65535',
+  ];
+
+  const invalidAddresses = [
+    '192.168.0.1',
+    '256.0.0.1:3000',
+    '192.168.0.1:70000',
+    0,
+    '0',
+    'invalid-address',
+    '127.0.0.1:',
+    ':3000',
+    '127.0.0.1:3000:extra',
+    {},
+    [],
+    true,
+    null,
+    undefined,
+  ];
+
+  // Test valid addresses
+  for (const address of validAddresses) {
+    assert.doesNotThrow(() => {
+      validateReplicaAddresses([address]);
+    }, `Valid address ${address} should not throw an error`);
+  }
+
+  // Test invalid addresses
+  for (const address of invalidAddresses) {
+    assert.throws(() => {
+      validateReplicaAddresses([address as any]);
+    }, `Invalid address ${address} should throw an error`);
+  }
+
+  // Test a mix of valid and invalid addresses
+  assert.throws(() => {
+    validateReplicaAddresses([...validAddresses, ...invalidAddresses] as any);
+  }, 'Mix of valid and invalid addresses should throw an error');
+
+  // Test empty array
+  assert.doesNotThrow(() => {
+    validateReplicaAddresses([]);
+  }, 'Empty array should not throw an error');
+});
 
 test('id() monotonically increasing', async (): Promise<void> => {
   let idA = id();
@@ -510,9 +567,9 @@ test('can get account transfers', async (): Promise<void> => {
   const account_errors = await client.createAccounts([accountC])
   assert.deepStrictEqual(account_errors, [])
 
-  var transfers_created : Transfer[] = [];
+  var transfers_created: Transfer[] = [];
   // Create transfers where the new account is either the debit or credit account:
-  for (var i=0; i<10;i++) {
+  for (var i = 0; i < 10; i++) {
     transfers_created.push({
       id: BigInt(i + 10000),
       debit_account_id: i % 2 == 0 ? accountC.id : accountA.id,
@@ -570,7 +627,7 @@ test('can get account transfers', async (): Promise<void> => {
     timestamp_min: 0n,
     timestamp_max: 0n,
     limit: 8190,
-    flags: AccountFilterFlags.debits |  AccountFilterFlags.reversed,
+    flags: AccountFilterFlags.debits | AccountFilterFlags.reversed,
   }
   transfers = await client.getAccountTransfers(filter)
   account_balances = await client.getAccountBalances(filter)
@@ -598,7 +655,7 @@ test('can get account transfers', async (): Promise<void> => {
     timestamp_min: 0n,
     timestamp_max: 0n,
     limit: 8190,
-    flags: AccountFilterFlags.credits |  AccountFilterFlags.reversed,
+    flags: AccountFilterFlags.credits | AccountFilterFlags.reversed,
   }
   transfers = await client.getAccountTransfers(filter)
   account_balances = await client.getAccountBalances(filter)
@@ -871,9 +928,9 @@ test('can get account transfers', async (): Promise<void> => {
 
 test('can query accounts', async (): Promise<void> => {
   {
-    var accounts : Account[] = [];
+    var accounts: Account[] = [];
     // Create transfers:
-    for (var i=0; i<10;i++) {
+    for (var i = 0; i < 10; i++) {
       accounts.push({
         id: id(),
         debits_pending: 0n,
@@ -1066,9 +1123,9 @@ test('can query transfers', async (): Promise<void> => {
     const create_accounts_result = await client.createAccounts([account])
     assert.deepStrictEqual(create_accounts_result, [])
 
-    var transfers_created : Transfer[] = [];
+    var transfers_created: Transfer[] = [];
     // Create transfers:
-    for (var i=0; i<10;i++) {
+    for (var i = 0; i < 10; i++) {
       transfers_created.push({
         id: id(),
         debit_account_id: i % 2 == 0 ? account.id : accountA.id,
@@ -1427,7 +1484,7 @@ test('accept zero-length lookup_transfers', async (): Promise<void> => {
   assert.deepStrictEqual(transfers, [])
 })
 
-async function main () {
+async function main() {
   const start = new Date().getTime()
   try {
     for (let i = 0; i < tests.length; i++) {
@@ -1439,7 +1496,7 @@ async function main () {
       })
     }
     const end = new Date().getTime()
-    console.log('Time taken (s):', (end - start)/1000)
+    console.log('Time taken (s):', (end - start) / 1000)
   } finally {
     await client.destroy()
   }

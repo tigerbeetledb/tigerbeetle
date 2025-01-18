@@ -8,30 +8,35 @@ import {
   AccountFilter,
   AccountBalance,
   QueryFilter,
+  Architecture,
+  Platform,
 } from './bindings'
 import { randomFillSync } from 'node:crypto'
 
 const binding: Binding = (() => {
-  const { arch, platform } = process
+  const { arch, platform }: { arch: string, platform: string } = process
 
-  const archMap = {
+  const archMap: Record<Architecture, string> = {
     "arm64": "aarch64",
     "x64": "x86_64"
   }
 
-  const platformMap = {
+  const platformMap: Record<Platform, string> = {
     "linux": "linux",
     "darwin": "macos",
-    "win32" : "windows",
+    "win32": "windows",
   }
 
-  if (! (arch in archMap)) {
+  if (!(arch in archMap)) {
     throw new Error(`Unsupported arch: ${arch}`)
   }
 
-  if (! (platform in platformMap)) {
+  if (!(platform in platformMap)) {
     throw new Error(`Unsupported platform: ${platform}`)
   }
+
+  const safeArch = arch as Architecture
+  const safePlatform = platform as Platform
 
   let extra = ''
 
@@ -62,7 +67,7 @@ const binding: Binding = (() => {
     }
   }
 
-  const filename = `./bin/${archMap[arch]}-${platformMap[platform]}${extra}/client.node`
+  const filename = `./bin/${archMap[safeArch]}-${platformMap[safePlatform]}${extra}/client.node`
   return require(filename)
 })()
 
@@ -103,7 +108,40 @@ export interface Client {
   destroy: () => void
 }
 
-export function createClient (args: ClientInitArgs): Client {
+export const validateReplicaAddresses = (addresses: Array<string | number>): void => {
+  // IP address pattern (including subnets, 0.0.0.0, and 127.0.0.1)
+  const ipPattern =
+    '(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)';
+
+  // Port pattern (0-65535)
+  const portPattern =
+    '(?:6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}|0)';
+
+  // Localhost pattern
+  const localhostPattern = 'localhost';
+
+  // Combined pattern
+  const combinedPattern = new RegExp(
+    `^(?:${ipPattern}:${portPattern}|${portPattern}|${localhostPattern}|${localhostPattern}:${portPattern})$`,
+  );
+
+  addresses.forEach((address) => {
+    if (typeof address === 'number') {
+      if (address < 1 || address > 65535) {
+        throw new Error(`Invalid port number: ${address}. Port must be from 1 to 65535.`)
+      }
+    } else if (typeof address === 'string') {
+      if (!combinedPattern.test(address)) {
+        throw new Error(`Invalid replica address: ${address}. Address must be a port number or string, or IP and Port string (Such as 0.0.0.0:3000).`)
+      }
+    } else {
+      throw new Error(`Invalid replica address type: ${typeof address}. Address must be a string or number.`)
+    }
+  })
+}
+
+export function createClient(args: ClientInitArgs): Client {
+  validateReplicaAddresses(args.replica_addresses);
   // Context becomes null when `destroy` is called. After that point, further `request` Promises
   // throw a shutdown Error. This prevents tb_client calls from happening after tb_client_deinit().
   let context: Context | null = binding.init({
