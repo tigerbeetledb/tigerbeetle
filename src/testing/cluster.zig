@@ -788,6 +788,9 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
                 .message_sent => |message| {
                     cluster.state_checker.on_message(message);
                 },
+                .head_op_updated => |header| {
+                    cluster.state_checker.on_head_op_updated(header, replica.replica);
+                },
                 .state_machine_opened => {
                     cluster.manifest_checker.forest_open(&replica.state_machine.forest);
                 },

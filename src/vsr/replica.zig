@@ -67,6 +67,7 @@ pub const ReplicaEvent = union(enum) {
     /// 4. Recover in the new checkpoint (but op_checkpoint wasn't called).
     checkpoint_completed,
     sync_stage_changed,
+    head_op_updated: *const Header.Prepare,
     client_evicted: u128,
 };
 
@@ -2446,11 +2447,12 @@ pub fn ReplicaType(
                             (self.log_view == self.view and header.op >= self.op))
                         {
                             self.set_op_and_commit_max(
-                                header.op,
+                                header,
                                 message.header.commit_max,
                                 @src(),
                             );
                             assert(self.op == header.op);
+                            assert(self.journal.header_with_op(self.op) != null);
                             assert(self.commit_max >= message.header.commit_max);
                             break;
                         }
@@ -8505,13 +8507,14 @@ pub fn ReplicaType(
 
         fn set_op_and_commit_max(
             self: *Replica,
-            op: u64,
+            header: *const Header.Prepare,
             commit_max: u64,
             source: SourceLocation,
         ) void {
             assert(self.status == .view_change or self.status == .normal or
                 self.status == .recovering_head);
 
+            const op = header.op;
             assert(op <= self.op_prepare_max_sync());
             maybe(op >= self.commit_max);
             maybe(op >= commit_max);
@@ -8548,11 +8551,16 @@ pub fn ReplicaType(
             self.op = op;
             self.journal.remove_entries_from(self.op + 1);
 
+            if (self.event_callback) |hook| hook(self, .{ .head_op_updated = header });
+
             // Crucially, we must never rewind `commit_max` (and then `commit_min`) because
             // `commit_min` represents what we have already applied to our state machine:
             self.commit_max = @max(self.commit_max, commit_max);
             assert(self.commit_max >= self.commit_min);
             assert(self.commit_max >= self.op -| constants.pipeline_prepare_queue_max);
+
+            // Ensure the "`replica.op` exists in the Journal" invariant isn't broken.
+            self.replace_header(header);
 
             log.debug("{}: {s}: view={} op={}..{} commit={}..{}", .{
                 self.replica,
@@ -8638,13 +8646,9 @@ pub fn ReplicaType(
             maybe(self.commit_min > commit_max);
             maybe(self.commit_max > commit_max);
             {
-                // "`replica.op` exists" invariant may be broken briefly between
-                // set_op_and_commit_max() and replace_header().
-                self.set_op_and_commit_max(header_head.op, commit_max, @src());
+                self.set_op_and_commit_max(header_head, commit_max, @src());
                 assert(self.commit_max <= self.op_prepare_max());
                 assert(self.commit_max <= self.op);
-                maybe(self.journal.header_with_op(self.op) == null);
-                self.replace_header(header_head);
                 assert(self.journal.header_with_op(self.op) != null);
             }
 
