@@ -1314,7 +1314,7 @@ pub fn ReplicaType(
         }
 
         pub fn invariants(self: *const Replica) void {
-            _ = self;
+            assert(self.journal.header_with_op(self.op) != null);
         }
 
         /// Time is measured in logical ticks that are incremented on every call to tick().
