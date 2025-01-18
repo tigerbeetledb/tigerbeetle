@@ -771,6 +771,12 @@ fn MessageBusType(comptime process_type: vsr.ProcessType) type {
                         return null;
                     }
 
+                    if (header.command == .reserved) {
+                        log.err("reserved command received from {}", .{connection.peer});
+                        connection.terminate(bus, .shutdown);
+                        return null;
+                    }
+
                     if (header.cluster != bus.cluster) {
                         log.warn("message addressed to the wrong cluster: {}", .{header.cluster});
                         connection.terminate(bus, .shutdown);
@@ -863,6 +869,8 @@ fn MessageBusType(comptime process_type: vsr.ProcessType) type {
                 header: *const Header,
             ) bool {
                 comptime assert(process_type == .replica);
+
+                assert(header.command != .reserved);
 
                 assert(bus.cluster == header.cluster);
                 assert(bus.connections_used > 0);
