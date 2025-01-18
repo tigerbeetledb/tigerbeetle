@@ -1634,6 +1634,17 @@ pub fn ReplicaType(
             assert(message.header.replica < self.replica_count);
             assert(message.header.operation != .reserved);
 
+            // Sanity check --- if the prepare is definitely from the current log-wrap, it should be
+            // appended.
+            defer {
+                if (self.status == .normal and message.header.view == self.view and
+                    message.header.op > self.op_checkpoint() and
+                    message.header.op <= self.op_checkpoint_next_trigger())
+                {
+                    assert(self.journal.has_header(message.header));
+                }
+            }
+
             // Replication balances two goals:
             // - replicate anything that the next replica is likely missing,
             // - avoid a feedback loop of cascading needless replication.
