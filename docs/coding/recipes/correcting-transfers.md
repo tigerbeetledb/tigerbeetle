@@ -1,7 +1,3 @@
----
-sidebar_position: 6
----
-
 # Correcting Transfers
 
 [`Transfer`s](../../reference/transfer.md) in TigerBeetle are immutable, so once they are created

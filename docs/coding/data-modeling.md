@@ -1,7 +1,3 @@
----
-sidebar_position: 2
----
-
 # Data Modeling
 
 This section describes various aspects of the TigerBeetle data model and provides some suggestions

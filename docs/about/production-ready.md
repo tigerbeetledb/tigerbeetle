@@ -1,7 +1,3 @@
----
-sidebar_position: 6
----
-
 # Production Ready
 
 TigerBeetle is ready for production use on Linux as of version 0.15.3, which provides protocol and

@@ -1,7 +1,3 @@
----
-sidebar_position: 2
----
-
 # Hardware
 
 TigerBeetle is designed to operate and provide more than adequate performance even on commodity

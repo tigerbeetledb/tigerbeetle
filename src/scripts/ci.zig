@@ -60,27 +60,8 @@ fn run_tests(shell: *Shell, gpa: std.mem.Allocator, language_requested: ?Languag
 
                 try ci.tests(shell, gpa);
             }
-
-            // Piggy back on node client testing to verify our docs, as we use node to generate
-            // them anyway.
-            if (language == .node and builtin.os.tag == .linux) {
-                const node_version = try shell.exec_stdout("node --version", .{});
-                if (std.mem.startsWith(u8, node_version, "v14")) {
-                    log.warn("skip building documentation on old Node.js", .{});
-                } else {
-                    try build_docs(shell);
-                }
-            }
         }
     }
-}
-
-fn build_docs(shell: *Shell) !void {
-    try shell.pushd("./src/docs_website");
-    defer shell.popd();
-
-    try shell.exec("npm install", .{});
-    try shell.exec("npm run build", .{});
 }
 
 fn validate_release(shell: *Shell, gpa: std.mem.Allocator, language_requested: ?Language) !void {

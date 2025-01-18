@@ -1,7 +1,3 @@
----
-sidebar_position: 5
----
-
 # `QueryFilter`
 
 A `QueryFilter` is a record containing the filter parameters for

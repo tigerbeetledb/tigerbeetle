@@ -1,7 +1,3 @@
----
-sidebar_position: 3
----
-
 # Safety
 
 TigerBeetle is designed to a higher safety standard than a general-purpose relational database such

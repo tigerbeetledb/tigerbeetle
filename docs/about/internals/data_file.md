@@ -1,7 +1,3 @@
----
-sidebar_position: 2
----
-
 # Data File
 
 > “Just show me the tables already!”

@@ -1,7 +1,3 @@
----
-sidebar_position: 1
----
-
 # TigerBeetle in Your System Architecture
 
 TigerBeetle is an Online Transaction Processing (OLTP) database built for safety and performance. It

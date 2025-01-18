@@ -1,7 +1,3 @@
----
-sidebar_position: 6
----
-
 # Time
 
 Time is a critical component of all distributed systems and databases. Within TigerBeetle, we keep

@@ -1,7 +1,3 @@
----
-sidebar_position: 7
----
-
 # Cloud
 
 Tigerbeetle is [optimized for performance](../performance.md), exploiting "close to the metal"

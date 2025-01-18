@@ -906,8 +906,7 @@ fn publish_docs(shell: *Shell, info: VersionInfo) !void {
         try shell.pushd("./src/docs_website");
         defer shell.popd();
 
-        try shell.exec("npm install", .{});
-        try shell.exec("npm run build", .{});
+        try shell.exec_zig("build", .{});
     }
 
     const token = try shell.env_get("TIGERBEETLE_DOCS_PAT");
@@ -919,7 +918,7 @@ fn publish_docs(shell: *Shell, info: VersionInfo) !void {
         shell.project_root.deleteTree("tigerbeetle-docs") catch {};
     }
 
-    const docs_files = try shell.find(.{ .where = &.{"src/docs_website/build"} });
+    const docs_files = try shell.find(.{ .where = &.{"src/docs_website/zig-out"} });
     assert(docs_files.len > 10);
     for (docs_files) |file| {
         try Shell.copy_path(
@@ -930,7 +929,7 @@ fn publish_docs(shell: *Shell, info: VersionInfo) !void {
                 u8,
                 shell.arena.allocator(),
                 file,
-                "src/docs_website/build",
+                "src/docs_website/zig-out",
                 "tigerbeetle-docs/",
             ),
         );

@@ -1,7 +1,3 @@
----
-sidebar_position: 4
----
-
 # Docker
 
 TigerBeetle can be run using Docker. However, it is not recommended.

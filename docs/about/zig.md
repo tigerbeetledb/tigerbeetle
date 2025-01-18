@@ -1,7 +1,3 @@
----
-sidebar_position: 7
----
-
 # Zig
 
 Coming from C, Zig is the language we've always wanted -- and the perfect language in which to write

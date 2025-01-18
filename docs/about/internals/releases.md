@@ -1,7 +1,3 @@
----
-sidebar_position: 6
----
-
 # Releases
 
 How a new TigerBeetle release is made. Note that the process is being

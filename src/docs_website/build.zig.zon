@@ -1,0 +1,17 @@
+.{
+    .name = "TigerBeetle Docs",
+    .version = "0.0.0",
+    .dependencies = .{
+        .pandoc_macos_arm64 = .{
+            .url = "https://github.com/jgm/pandoc/releases/download/3.4/pandoc-3.4-arm64-macOS.zip",
+            .hash = "1220c2506a07845d667e7c127fd0811e4f5f7591e38ccc7fb4376450f3435048d87a",
+            .lazy = true,
+        },
+        .pandoc_linux_amd64 = .{
+            .url = "https://github.com/jgm/pandoc/releases/download/3.4/pandoc-3.4-linux-amd64.tar.gz",
+            .hash = "1220139a44886509d8a61b44d8b8a79d03bad29ea95493dc97cd921d3f2eb208562c",
+            .lazy = true,
+        },
+    },
+    .paths = .{"."},
+}

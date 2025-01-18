@@ -1,7 +1,3 @@
----
-sidebar_position: 6
----
-
 # Client Sessions
 
 A _client session_ is a sequence of [requests](./requests/README.md) and replies sent between a

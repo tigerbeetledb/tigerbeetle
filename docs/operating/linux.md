@@ -1,7 +1,3 @@
----
-sidebar_position: 3
----
-
 # Deploying on Linux
 
 ## systemd

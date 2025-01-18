@@ -1,7 +1,3 @@
----
-sidebar_position: 1
----
-
 # Built for OLTP
 
 Online Transaction Processing (OLTP) is about recording business transactions in real-time. This

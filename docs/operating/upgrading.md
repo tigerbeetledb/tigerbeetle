@@ -1,7 +1,3 @@
----
-sidebar_position: 5
----
-
 # Upgrading
 
 TigerBeetle guarantees storage stability and provides forward upgradeability. In other words, data

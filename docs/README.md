@@ -1,8 +1,3 @@
----
-slug: /
-sidebar_position: 1
----
-
 # TigerBeetle Docs
 
 TigerBeetle is a distributed financial accounting database designed for mission critical safety and

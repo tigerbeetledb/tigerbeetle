@@ -1,7 +1,3 @@
----
-sidebar_position: 2
----
-
 # Performance
 
 TigerBeetle provides more performance than a general-purpose relational database such as MySQL or an

@@ -1,7 +1,3 @@
----
-sidebar_position: 3
----
-
 # Financial Accounting
 
 For developers with non-financial backgrounds, TigerBeetle's use of accounting concepts like debits

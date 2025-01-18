@@ -1,7 +1,3 @@
----
-sidebar_position: 8
----
-
 # Upgrades
 
 Upgrades in TigerBeetle are handled by bundling multiple underlying TigerBeetle binaries of

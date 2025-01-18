@@ -1,7 +1,3 @@
----
-sidebar_position: 4
----
-
 # Reliable Transaction Submission
 
 When making payments or recording transfers, it is important to ensure that they are recorded once

@@ -1,8 +1,3 @@
----
-sidebar_label: Quick Start
-sidebar_position: 2
----
-
 # Quick Start
 
 This page will guide you through downloading TigerBeetle, setting up a single- or multi-node

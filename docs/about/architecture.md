@@ -1,7 +1,3 @@
----
-sidebar_position: 5
----
-
 # Architecture
 
 In theory, TigerBeetle is a replicated state machine that **takes an initial starting state**
