@@ -773,13 +773,15 @@ pub const Simulator = struct {
                             }
                         }
                     }
-                    if (simulator.smallest_missing_prepare_between(
-                        &replica,
-                        op_repair_min,
-                        replica.commit_min,
-                    )) |op| {
-                        if (missing_prepare_op == null or op < missing_prepare_op.?) {
-                            missing_prepare_op = op;
+                    if (op_repair_min <= replica.commit_min) {
+                        if (simulator.smallest_missing_prepare_between(
+                            &replica,
+                            op_repair_min,
+                            replica.commit_min,
+                        )) |op| {
+                            if (missing_prepare_op == null or op < missing_prepare_op.?) {
+                                missing_prepare_op = op;
+                            }
                         }
                     }
                 }
