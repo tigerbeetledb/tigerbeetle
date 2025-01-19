@@ -56,9 +56,19 @@ public class Workload implements Callable<Void> {
 
         lookupAllAccounts().ifPresent(query -> {
           var response = (LookupAccountsResult) query.execute(client);
-          statistics.addRequests(response.accountsFound().size(), 0);
+          statistics.addEvents((long) response.accountsFound().size(), 0);
           response.reconcile(model);
         });
+
+        // Sleep random duration after each command cycle to allow cluster to heal.
+        try {
+          // Non-linear distribution, making long sleeps less likely.
+          var sleepDurationMs = (long) Math.pow(random.nextDouble(1, 20), 3);
+          Thread.sleep(sleepDurationMs);
+        } catch (InterruptedException e) { 
+          return null;
+        }
+
       } catch (AssertionError e) {
         System.err.println("ledger %d: Assertion failed after executing command: %s".formatted(
               ledger, 
@@ -71,9 +81,9 @@ public class Workload implements Callable<Void> {
   <T> void recordResultEntries(ArrayList<ResultEntry<T>> entries) {
     for (var entry : entries) {
       if (entry.successful()) {
-        statistics.addRequests(1, 0);
+        statistics.addEvents(1, 0);
       } else {
-        statistics.addRequests(0, 1);
+        statistics.addEvents(0, 1);
       }
     }
   }
@@ -82,7 +92,10 @@ public class Workload implements Callable<Void> {
     // Commands are `Supplier`s of values. They are intially wrapped in `Optional`, to represent if
     // they are enabled. Further, they are wrapped in `WithOdds`, increasing the likelyhood of
     // certain commands being chosen.
-    var commandsAll = List.of(WithOdds.of(1, createAccounts()), WithOdds.of(5, createTransfers()));
+    var commandsAll = List.of(
+        WithOdds.of(1, createAccounts()), 
+        WithOdds.of(5, createTransfers())
+    );
 
     // Here we select all commands that are currently enabled.
     var commandsEnabled = new ArrayList<WithOdds<Supplier<? extends Command<?>>>>();

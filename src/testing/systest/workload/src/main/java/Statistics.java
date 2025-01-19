@@ -3,20 +3,12 @@
  * This class is thread-safe.
  */
 class Statistics {
-  private long startTimeMs;
   private long successful;
   private long failed;
 
-  public Statistics(long startTimeMs) {
-    this.startTimeMs = startTimeMs;
+  public Statistics() {
     this.successful = 0;
     this.failed = 0;
-  }
-
-  public synchronized long requestsPerSecond() {
-    long nowMs = System.currentTimeMillis();
-    long elapsedSeconds = (nowMs - startTimeMs) / 1000;
-    return (successful / elapsedSeconds) + (failed / elapsedSeconds);
   }
 
   public synchronized long successful() {
@@ -27,7 +19,7 @@ class Statistics {
       return this.failed;
   }
 
-  public void addRequests(long successful, long failed) {
+  public void addEvents(long successful, long failed) {
     synchronized (this) {
       this.successful += successful;
       this.failed += failed;

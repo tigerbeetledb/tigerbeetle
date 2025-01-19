@@ -35,7 +35,7 @@ public final class Main {
 
       var executor = Executors.newFixedThreadPool(workloadCount);
       var completionService = new ExecutorCompletionService<Void>(executor);
-      var statistics = new Statistics(System.currentTimeMillis());
+      var statistics = new Statistics();
       var logger = new Thread(() -> logStatistics(statistics));
       logger.setDaemon(true);
       logger.start();
@@ -62,19 +62,17 @@ public final class Main {
       try {
         Thread.sleep(Duration.ofSeconds(10));
 
-        var requestsSuccessful = statistics.successful();
-        var requestsFailed = statistics.failed();
-        var requestsTotal = requestsSuccessful + requestsFailed;
-        var requestsPerSecond = statistics.requestsPerSecond();
-        var requestSuccessRate = requestsTotal > 0 
-          ? ((double) requestsSuccessful / requestsTotal) 
+        var eventsSuccessful = statistics.successful();
+        var eventsFailed = statistics.failed();
+        var eventsTotal = eventsSuccessful + eventsFailed;
+        var eventSuccessRate = eventsTotal > 0 
+          ? ((double) eventsSuccessful / eventsTotal) 
           : 0.0;
 
         System.err.println(
-            "%d requests in total, %s successful, throughput of %d req/s".formatted(
-              requestsTotal,
-              NumberFormat.getPercentInstance().format(requestSuccessRate),
-              requestsPerSecond));
+            "%d events in total, %s successful".formatted(
+              eventsTotal,
+              NumberFormat.getPercentInstance().format(eventSuccessRate)));
       } catch (InterruptedException e) {
         break;
       }
