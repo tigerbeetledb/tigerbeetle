@@ -39,8 +39,9 @@ pub fn StateCheckerType(comptime Client: type, comptime Replica: type) type {
         /// The number of times the canonical state has been advanced.
         requests_committed: u64 = 0,
 
-        /// Tracks the latest op acked by a replica across restarts.
-        replica_head_max: []ReplicaHead,
+        /// Tracks the latest op acked by a replica across restarts. Marked as null if the op is
+        /// truncated through a view change.
+        replica_head_max: []?ReplicaHead,
         pub fn init(allocator: mem.Allocator, options: struct {
             cluster_id: u128,
             replica_count: u8,
@@ -60,9 +61,9 @@ pub fn StateCheckerType(comptime Client: type, comptime Replica: type) type {
                 .replicas = commit_replicas,
             });
 
-            const replica_head_max = try allocator.alloc(ReplicaHead, options.replicas.len);
+            const replica_head_max = try allocator.alloc(?ReplicaHead, options.replicas.len);
             errdefer allocator.free(replica_head_max);
-            for (replica_head_max) |*head| head.* = .{ .view = 0, .op = 0 };
+            for (replica_head_max) |*head| head.* = null;
 
             return StateChecker{
                 .node_count = @intCast(options.replicas.len),
@@ -82,13 +83,30 @@ pub fn StateCheckerType(comptime Client: type, comptime Replica: type) type {
 
         pub fn on_message(state_checker: *StateChecker, message: *const Message) void {
             if (message.header.into_const(.prepare_ok)) |header| {
-                const head = &state_checker.replica_head_max[header.replica];
-                if (header.view > head.view or
-                    (header.view == head.view and header.op > head.op))
+                const head_max = &state_checker.replica_head_max[header.replica];
+                if (head_max.* == null or header.view > head_max.*.?.view or
+                    (header.view == head_max.*.?.view and header.op > head_max.*.?.op))
                 {
-                    head.view = header.view;
-                    head.op = header.op;
+                    head_max.* = .{ .view = header.view, .op = header.op };
                 }
+            }
+        }
+
+        pub fn on_head_op_updated(
+            state_checker: *StateChecker,
+            new_head: *const vsr.Header.Prepare,
+            replica_index: u8,
+        ) void {
+            const head_max = &state_checker.replica_head_max[replica_index];
+
+            // If the latest op acked by this replica was truncated through a view change,
+            // replica_head_max is uncertain till the next prepare_ok is sent. To avoid peeking into
+            // replica states, we conservatively mark replica_head_max as null when the new head is
+            // from a future view (even though it *may* not have been truncated).
+            if (head_max.* != null and
+                (new_head.op < head_max.*.?.op or new_head.view > head_max.*.?.view))
+            {
+                head_max.* = null;
             }
         }
 
@@ -111,10 +129,10 @@ pub fn StateCheckerType(comptime Client: type, comptime Replica: type) type {
                 return;
             }
 
-            if (replica.status != .recovering_head) {
-                const head_max = &state_checker.replica_head_max[replica_index];
-                assert(replica.view > head_max.view or
-                    (replica.view == head_max.view and replica.op >= head_max.op));
+            const head_max = &state_checker.replica_head_max[replica_index];
+            if (replica.status != .recovering_head and head_max.* != null) {
+                assert(replica.view > head_max.*.?.view or
+                    (replica.view == head_max.*.?.view and replica.op >= head_max.*.?.op));
             }
 
             const commit_root_op = replica.superblock.working.vsr_state.checkpoint.header.op;
