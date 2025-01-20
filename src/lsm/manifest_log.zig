@@ -70,8 +70,9 @@ pub fn ManifestLogType(comptime Storage: type) type {
 
         superblock: *SuperBlock,
         grid: *Grid,
-        options: Options,
-        pace: Pace,
+        pace: *const Pace,
+
+        forest_table_count_max: u32,
 
         grid_reservation: ?Grid.Reservation = null,
 
@@ -142,16 +143,13 @@ pub fn ManifestLogType(comptime Storage: type) type {
             manifest_log: *ManifestLog,
             allocator: mem.Allocator,
             grid: *Grid,
-            options: Options,
+            compaction_pace: *const Pace,
         ) !void {
-            assert(options.tree_id_min <= options.tree_id_max);
-
             manifest_log.* = .{
                 .superblock = grid.superblock,
                 .grid = grid,
-                .options = options,
-
-                .pace = undefined,
+                .forest_table_count_max = compaction_pace.tables_max,
+                .pace = compaction_pace,
                 .log_block_checksums = undefined,
                 .log_block_addresses = undefined,
                 .blocks = undefined,
@@ -159,12 +157,6 @@ pub fn ManifestLogType(comptime Storage: type) type {
                 .table_extents = undefined,
                 .tables_removed = undefined,
             };
-
-            manifest_log.pace = Pace.init(.{
-                .tree_count = options.forest_tree_count(),
-                .tables_max = options.forest_table_count_max,
-                .compact_extra_blocks = constants.lsm_manifest_compact_extra_blocks,
-            });
 
             inline for (std.meta.fields(Pace)) |pace_field| {
                 log.debug("{?}: Manifest.Pace.{s} = {d}", .{
@@ -213,14 +205,14 @@ pub fn ManifestLogType(comptime Storage: type) type {
                 // Allocate space for one additional table, so that the code can still use
                 // `getOrPutAssumeCapacity` while making it easier to check if the limit has been
                 // exceeded to error with a friendly message.
-                options.forest_table_count_max + 1,
+                manifest_log.forest_table_count_max + 1,
             );
             errdefer manifest_log.table_extents.deinit(allocator);
 
             manifest_log.tables_removed = TablesRemoved{};
             try manifest_log.tables_removed.ensureTotalCapacity(
                 allocator,
-                options.forest_table_count_max,
+                manifest_log.forest_table_count_max,
             );
             errdefer manifest_log.tables_removed.deinit(allocator);
         }
@@ -250,7 +242,7 @@ pub fn ManifestLogType(comptime Storage: type) type {
             manifest_log.* = .{
                 .superblock = manifest_log.superblock,
                 .grid = manifest_log.grid,
-                .options = manifest_log.options,
+                .forest_table_count_max = manifest_log.pace.tables_max,
                 .pace = manifest_log.pace,
                 .log_block_checksums = manifest_log.log_block_checksums,
                 .log_block_addresses = manifest_log.log_block_addresses,
@@ -322,10 +314,8 @@ pub fn ManifestLogType(comptime Storage: type) type {
             assert(manifest_log.read_callback != null);
             assert(!manifest_log.writing);
             assert(manifest_log.write_callback == null);
-            assert(manifest_log.table_extents.count() <=
-                manifest_log.options.forest_table_count_max);
-            assert(manifest_log.tables_removed.count() <=
-                manifest_log.options.forest_table_count_max);
+            assert(manifest_log.table_extents.count() <= manifest_log.forest_table_count_max);
+            assert(manifest_log.tables_removed.count() <= manifest_log.forest_table_count_max);
             assert(manifest_log.log_block_checksums.count <
                 manifest_log.log_block_checksums.buffer.len);
             assert(manifest_log.log_block_checksums.count ==
@@ -381,8 +371,6 @@ pub fn ManifestLogType(comptime Storage: type) type {
 
                 const table = &tables_used[entry];
                 assert(table.label.event != .reserved);
-                assert(table.tree_id >= manifest_log.options.tree_id_min);
-                assert(table.tree_id <= manifest_log.options.tree_id_max);
                 assert(table.address > 0);
 
                 if (table.label.event == .remove) {
@@ -436,10 +424,8 @@ pub fn ManifestLogType(comptime Storage: type) type {
             assert(manifest_log.read_callback != null);
             assert(!manifest_log.writing);
             assert(manifest_log.write_callback == null);
-            assert(manifest_log.table_extents.count() <=
-                manifest_log.options.forest_table_count_max);
-            assert(manifest_log.tables_removed.count() <=
-                manifest_log.options.forest_table_count_max);
+            assert(manifest_log.table_extents.count() <= manifest_log.forest_table_count_max);
+            assert(manifest_log.tables_removed.count() <= manifest_log.forest_table_count_max);
             assert(manifest_log.log_block_checksums.count ==
                 manifest_log.log_block_addresses.count);
             assert(manifest_log.log_block_checksums.count ==
@@ -560,13 +546,13 @@ pub fn ManifestLogType(comptime Storage: type) type {
 
         fn check_tables_count(manifest_log: *ManifestLog) void {
             const tables_count = manifest_log.table_extents.count();
-            if (tables_count > manifest_log.options.forest_table_count_max) {
+            if (tables_count > manifest_log.forest_table_count_max) {
                 vsr.fatal(
                     .forest_tables_count_would_exceed_limit,
                     "forest_tables_count would exceed limit " ++
                         "(tables_count={} tables_max={}) - " ++
                         "please contact the team directly who will be able to assist",
-                    .{ tables_count, manifest_log.options.forest_table_count_max },
+                    .{ tables_count, manifest_log.forest_table_count_max },
                 );
             }
         }
@@ -834,7 +820,7 @@ pub fn ManifestLogType(comptime Storage: type) type {
             maybe(frees == 0);
             assert(manifest_log.blocks_closed <= manifest_log.pace.half_bar_compact_blocks_max);
 
-            manifest_log.grid.release(oldest_address);
+            manifest_log.grid.release(&.{oldest_address});
             manifest_log.reading = false;
 
             manifest_log.compact_next_block();
@@ -1022,19 +1008,6 @@ pub fn ManifestLogType(comptime Storage: type) type {
     };
 }
 
-pub const Options = struct {
-    tree_id_min: u16, // inclusive
-    tree_id_max: u16, // inclusive
-    forest_table_count_max: u32,
-
-    /// The total number of trees in the forest.
-    pub fn forest_tree_count(options: *const Options) u32 {
-        assert(options.tree_id_min <= options.tree_id_max);
-
-        return (options.tree_id_max - options.tree_id_min) + 1;
-    }
-};
-
 /// The goals of manifest log compaction are (in no particular order):
 ///
 /// 1. Free enough manifest blocks such that there are always enough free slots in the manifest
@@ -1131,7 +1104,7 @@ pub const Options = struct {
 ///     during a checkpoint. This oversight is masked because "A" is overestimated (see previous
 ///     bullet).
 ///
-const Pace = struct {
+pub const Pace = struct {
     /// "A":
     /// The maximum number of manifest blocks appended during a single half-bar by table appends.
     ///
@@ -1178,7 +1151,7 @@ const Pace = struct {
         }
     }
 
-    fn init(options: struct {
+    pub fn init(options: struct {
         tree_count: u32,
         tables_max: u32,
         compact_extra_blocks: u32,

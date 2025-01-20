@@ -12,12 +12,15 @@ const schema = @import("schema.zig");
 const GridType = @import("../vsr/grid.zig").GridType;
 const NodePool = @import("node_pool.zig").NodePoolType(constants.lsm_manifest_node_size, 16);
 const ManifestLogType = @import("manifest_log.zig").ManifestLogType;
+const ManifestLogPace = @import("manifest_log.zig").Pace;
+
 const ScanBufferPool = @import("scan_buffer.zig").ScanBufferPool;
 const ResourcePoolType = @import("compaction.zig").ResourcePoolType;
 const snapshot_min_for_table_output = @import("compaction.zig").snapshot_min_for_table_output;
 const compaction_op_min = @import("compaction.zig").compaction_op_min;
 const compaction_block_count_bar_max = @import("compaction.zig").compaction_block_count_bar_max;
 const compaction_block_count_beat_min = @import("compaction.zig").compaction_block_count_beat_min;
+const compaction_input_tables_max = @import("compaction.zig").compaction_tables_input_max;
 
 /// The maximum number of tables for the forest as a whole. This is set a bit backwards due to how
 /// the code is structured: a single tree should be able to use all the tables in the forest, so the
@@ -200,6 +203,16 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
             .max = tree_infos[tree_infos.len - 1].tree_id,
         };
 
+        const manifest_log_compaction_pace = ManifestLogPace.init(.{
+            .tree_count = tree_infos.len,
+            // TODO Make this a runtime argument (from the CLI, derived from storage-size-max if
+            // possible).
+            .tables_max = table_count_max,
+            .compact_extra_blocks = constants.lsm_manifest_compact_extra_blocks,
+        });
+        pub const manifest_log_blocks_released_half_bar_max =
+            manifest_log_compaction_pace.half_bar_compact_blocks_max;
+
         pub const Options = struct {
             node_count: u32,
             /// The amount of blocks allocated for compactions. Compactions will be deterministic
@@ -260,13 +273,11 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
             try forest.node_pool.init(allocator, options.node_count);
             errdefer forest.node_pool.deinit(allocator);
 
-            try forest.manifest_log.init(allocator, grid, .{
-                .tree_id_min = tree_id_range.min,
-                .tree_id_max = tree_id_range.max,
-                // TODO Make this a runtime argument (from the CLI, derived from storage-size-max if
-                // possible).
-                .forest_table_count_max = table_count_max,
-            });
+            try forest.manifest_log.init(
+                allocator,
+                grid,
+                &manifest_log_compaction_pace,
+            );
             errdefer forest.manifest_log.deinit(allocator);
 
             var grooves_initialized: usize = 0;
@@ -744,6 +755,49 @@ pub fn ForestType(comptime _Storage: type, comptime groove_cfg: anytype) type {
                 assert(table_removed);
             }
             assert(tables_latest.count() == 0);
+        }
+
+        /// Calculates the maximum number of blocks that could be released by Tree and ManifestLog
+        /// compactions before a checkpoint becomes durable on a commit quorum of replicas.
+        ///
+        /// A checkpoint is guaranteed to be durable when a replica commits the (pipeline + 1)th
+        /// prepare after checkpoint trigger (see `op_repair_min` in replica.zig for more details).
+        /// Therefore, the maximum number of blocks released prior checkpoint durability is
+        /// equivalent to the maximum number of blocks released by the first pipeline of prepares
+        /// after checkpoint trigger.
+        pub fn compaction_blocks_released_per_pipeline_max() usize {
+            const half_bar_ops = @divExact(constants.lsm_compaction_ops, 2);
+            const pipeline_half_bars =
+                stdx.div_ceil(
+                constants.pipeline_prepare_queue_max,
+                half_bar_ops,
+            );
+
+            // Maximum number of blocks released within a single half-bar by compaction.
+            const compaction_blocks_released_half_bar_max = blocks: {
+                var blocks: usize = 0;
+                inline for (Forest.tree_infos) |tree_info| {
+                    blocks +=
+                        stdx.div_ceil(constants.lsm_levels, 2) *
+                        (compaction_input_tables_max *
+                        (1 + tree_info.Tree.Table.layout.data_block_count_max));
+                }
+                break :blocks blocks;
+            };
+
+            const compaction_blocks_released_pipeline_max =
+                (pipeline_half_bars * compaction_blocks_released_half_bar_max) +
+                // Compaction is paced across all beats, so if a pipeline is less than half a bar,
+                // for simplicity, use the upper bound for a half a bar (treating pacing as
+                // imperfect).
+                @intFromBool(pipeline_half_bars == 0) * compaction_blocks_released_half_bar_max;
+
+            // Maximum number of blocks released within a pipeline by ManifestLog compactions.
+            const manifest_log_blocks_released_pipeline_max =
+                pipeline_half_bars * Forest.manifest_log_blocks_released_half_bar_max;
+
+            return compaction_blocks_released_pipeline_max +
+                manifest_log_blocks_released_pipeline_max;
         }
     };
 }

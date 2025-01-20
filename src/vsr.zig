@@ -58,6 +58,7 @@ pub const SuperBlockManifestReferences = superblock.ManifestReferences;
 pub const SuperBlockTrailerReference = superblock.TrailerReference;
 pub const VSRState = superblock.SuperBlockHeader.VSRState;
 pub const CheckpointState = superblock.SuperBlockHeader.CheckpointState;
+pub const CheckpointStateOld = superblock.SuperBlockHeader.CheckpointStateOld;
 pub const checksum = @import("vsr/checksum.zig").checksum;
 pub const ChecksumStream = @import("vsr/checksum.zig").ChecksumStream;
 pub const Header = @import("vsr/message_header.zig").Header;
@@ -1571,11 +1572,11 @@ pub const Checkpoint = struct {
         }
     }
 
-    pub fn durable(checkpoint: u64, commit_max: u64) bool {
+    pub fn durable(checkpoint: u64, commit: u64) bool {
         assert(valid(checkpoint));
 
         if (trigger_for_checkpoint(checkpoint)) |trigger| {
-            return commit_max > (trigger + constants.pipeline_prepare_queue_max);
+            return commit > (trigger + constants.pipeline_prepare_queue_max);
         } else {
             return true;
         }
@@ -1698,3 +1699,11 @@ pub const Snapshot = struct {
         return op + 1;
     }
 };
+
+pub fn block_count_max(storage_size_limit: u64) usize {
+    const shard_count_limit: usize = @intCast(@divFloor(
+        storage_size_limit - superblock.data_file_size_min,
+        constants.block_size * FreeSet.shard_bits,
+    ));
+    return shard_count_limit * FreeSet.shard_bits;
+}

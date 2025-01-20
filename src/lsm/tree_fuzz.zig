@@ -19,6 +19,7 @@ const NodePool = @import("node_pool.zig").NodePoolType(constants.lsm_manifest_no
 const TableUsage = @import("table.zig").TableUsage;
 const TableType = @import("table.zig").TableType;
 const ManifestLog = @import("manifest_log.zig").ManifestLogType(Storage);
+const ManifestLogPace = @import("manifest_log.zig").Pace;
 const snapshot_min_for_table_output = @import("compaction.zig").snapshot_min_for_table_output;
 const compaction_op_min = @import("compaction.zig").compaction_op_min;
 const compaction_block_count_bar_max = @import("compaction.zig").compaction_block_count_bar_max;
@@ -125,6 +126,7 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
             manifest_log_compact,
             grid_checkpoint,
             superblock_checkpoint,
+            grid_checkpoint_durable,
             tree_lookup,
             scan_tree,
         };
@@ -168,14 +170,22 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
                 .trace = &env.trace,
                 .missing_blocks_max = 0,
                 .missing_tables_max = 0,
+                // Grid.mark_checkpoint_not_durable releases the FreeSet checkpoints blocks into
+                // FreeSet.blocks_released_prior_checkpoint_durability.
+                .blocks_released_prior_checkpoint_durability_max = Grid
+                    .free_set_checkpoints_blocks_max(constants.storage_size_limit_default),
             });
             defer env.grid.deinit(allocator);
 
-            try env.manifest_log.init(allocator, &env.grid, .{
-                .tree_id_min = 1,
-                .tree_id_max = 1,
-                .forest_table_count_max = table_count_max,
-            });
+            try env.manifest_log.init(
+                allocator,
+                &env.grid,
+                &ManifestLogPace.init(.{
+                    .tree_count = 1,
+                    .tables_max = table_count_max,
+                    .compact_extra_blocks = constants.lsm_manifest_compact_extra_blocks,
+                }),
+            );
             defer env.manifest_log.deinit(allocator);
 
             try env.node_pool.init(allocator, node_count);
@@ -237,6 +247,10 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
             env.grid.open(grid_open_callback);
 
             env.tick_until_state_change(.free_set_open, .tree_init);
+
+            // The first checkpoint is trivially durable.
+            env.grid.free_set.mark_checkpoint_durable();
+
             try env.tree.init(allocator, &env.node_pool, &env.grid, .{
                 .id = 1,
                 .name = "Key.Value",
@@ -373,9 +387,9 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
         pub fn checkpoint(env: *Environment, op: u64) void {
             env.tree.assert_between_bars();
 
-            env.grid.checkpoint(grid_checkpoint_callback);
             env.change_state(.fuzzing, .grid_checkpoint);
-            env.tick_until_state_change(.grid_checkpoint, .fuzzing);
+            env.grid.checkpoint(grid_checkpoint_callback);
+            env.tick_until_state_change(.grid_checkpoint, .superblock_checkpoint);
 
             const checkpoint_op = op - constants.lsm_compaction_ops;
             env.superblock.checkpoint(superblock_checkpoint_callback, &env.superblock_context, .{
@@ -387,7 +401,12 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
                 },
                 .view_attributes = null,
                 .manifest_references = std.mem.zeroes(vsr.SuperBlockManifestReferences),
-                .free_set_reference = env.grid.free_set_checkpoint.checkpoint_reference(),
+                .free_set_references = .{
+                    .blocks_acquired = env.grid
+                        .free_set_checkpoint_blocks_acquired.checkpoint_reference(),
+                    .blocks_released = env.grid
+                        .free_set_checkpoint_blocks_released.checkpoint_reference(),
+                },
                 .client_sessions_reference = .{
                     .last_block_checksum = 0,
                     .last_block_address = 0,
@@ -402,13 +421,18 @@ fn EnvironmentType(comptime table_usage: TableUsage) type {
                 .release = vsr.Release.minimum,
             });
 
-            env.change_state(.fuzzing, .superblock_checkpoint);
             env.tick_until_state_change(.superblock_checkpoint, .fuzzing);
+
+            // The fuzzer runs in a single process, all checkpoints are trivially durable. Use
+            // free_set.mark_checkpoint_durable() instead of grid.mark_checkpoint_durable(); the
+            // latter requires passing a callback, which is called synchronously in fuzzers anyway.
+            env.grid.mark_checkpoint_not_durable();
+            env.grid.free_set.mark_checkpoint_durable();
         }
 
         fn grid_checkpoint_callback(grid: *Grid) void {
             const env: *Environment = @fieldParentPtr("grid", grid);
-            env.change_state(.grid_checkpoint, .fuzzing);
+            env.change_state(.grid_checkpoint, .superblock_checkpoint);
         }
 
         fn superblock_checkpoint_callback(superblock_context: *SuperBlock.Context) void {

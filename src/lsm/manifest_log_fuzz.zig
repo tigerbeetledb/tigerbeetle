@@ -19,21 +19,22 @@ const SuperBlock = @import("../vsr/superblock.zig").SuperBlockType(Storage);
 const Storage = @import("../testing/storage.zig").Storage;
 const Grid = @import("../vsr/grid.zig").GridType(Storage);
 const ManifestLog = @import("manifest_log.zig").ManifestLogType(Storage);
-const ManifestLogOptions = @import("manifest_log.zig").Options;
+const ManifestLogPace = @import("manifest_log.zig").Pace;
 const fuzz = @import("../testing/fuzz.zig");
 const schema = @import("./schema.zig");
 const compaction_tables_input_max = @import("./compaction.zig").compaction_tables_input_max;
 const TableInfo = schema.ManifestNode.TableInfo;
 
-const manifest_log_options = ManifestLogOptions{
-    .tree_id_min = 1,
+const tree_count = 20;
+const manifest_log_compaction_pace = ManifestLogPace.init(.{
     // Use many trees so that we fill manifest blocks quickly.
     // (This makes it easier to hit "worst case" scenarios in manifest compaction pacing.)
-    .tree_id_max = 20,
+    .tree_count = tree_count,
     // Use a artificially low table-count-max so that we can easily fill the manifest log and verify
     // that pacing is correct.
-    .forest_table_count_max = schema.ManifestNode.entry_count_max * 100,
-};
+    .tables_max = schema.ManifestNode.entry_count_max * 100,
+    .compact_extra_blocks = constants.lsm_manifest_compact_extra_blocks,
+});
 
 pub fn main(args: fuzz.FuzzArgs) !void {
     const allocator = fuzz.allocator;
@@ -78,6 +79,9 @@ fn run_fuzz(
 
         env.open_grid();
         env.wait(&env.manifest_log);
+
+        // The first checkpoint is trivially durable.
+        env.grid.free_set.mark_checkpoint_durable();
 
         env.open();
         env.wait(&env.manifest_log);
@@ -153,7 +157,7 @@ fn generate_events(
         // All of the trees we are inserting/modifying have the same id (for simplicity), but we
         // want to perform more updates if there are more trees, to better simulate a real state
         // machine.
-        for (manifest_log_options.tree_id_min..manifest_log_options.tree_id_max + 1) |_| {
+        for (0..tree_count) |_| {
             const operations: struct {
                 update_levels: usize,
                 update_snapshots: usize,
@@ -178,7 +182,7 @@ fn generate_events(
             };
 
             for (0..operations.inserts) |_| {
-                if (tables.items.len == manifest_log_options.forest_table_count_max) break;
+                if (tables.items.len == manifest_log_compaction_pace.tables_max) break;
 
                 const table = TableInfo{
                     .checksum = 0,
@@ -243,7 +247,7 @@ fn generate_events(
         }
     }
     log.info("event_count = {d}", .{events.items.len});
-    log.info("tables_max = {d}/{d}", .{ tables_max, manifest_log_options.forest_table_count_max });
+    log.info("tables_max = {d}/{d}", .{ tables_max, manifest_log_compaction_pace.tables_max });
 
     return events.toOwnedSlice();
 }
@@ -318,6 +322,10 @@ const Environment = struct {
             .trace = &env.trace,
             .missing_blocks_max = 0,
             .missing_tables_max = 0,
+            // Grid.mark_checkpoint_not_durable releases the FreeSet checkpoints blocks into
+            // FreeSet.blocks_released_prior_checkpoint_durability.
+            .blocks_released_prior_checkpoint_durability_max = Grid
+                .free_set_checkpoints_blocks_max(constants.storage_size_limit_default),
         });
         errdefer env.grid.deinit(allocator);
 
@@ -327,15 +335,20 @@ const Environment = struct {
             .trace = &env.trace_verify,
             .missing_blocks_max = 0,
             .missing_tables_max = 0,
+            .blocks_released_prior_checkpoint_durability_max = 0,
         });
         errdefer env.grid_verify.deinit(allocator);
 
         fields_initialized += 1;
-        try env.manifest_log.init(allocator, &env.grid, manifest_log_options);
+        try env.manifest_log.init(allocator, &env.grid, &manifest_log_compaction_pace);
         errdefer env.manifest_log.deinit(allocator);
 
         fields_initialized += 1;
-        try env.manifest_log_verify.init(allocator, &env.grid_verify, manifest_log_options);
+        try env.manifest_log_verify.init(
+            allocator,
+            &env.grid_verify,
+            &manifest_log_compaction_pace,
+        );
         errdefer env.manifest_log_verify.deinit(allocator);
 
         fields_initialized += 1;
@@ -484,7 +497,12 @@ const Environment = struct {
                 },
                 .view_attributes = null,
                 .manifest_references = env.manifest_log.checkpoint_references(),
-                .free_set_reference = env.grid.free_set_checkpoint.checkpoint_reference(),
+                .free_set_references = .{
+                    .blocks_acquired = env.grid
+                        .free_set_checkpoint_blocks_acquired.checkpoint_reference(),
+                    .blocks_released = env.grid
+                        .free_set_checkpoint_blocks_released.checkpoint_reference(),
+                },
                 .client_sessions_reference = .{
                     .last_block_checksum = 0,
                     .last_block_address = 0,
@@ -500,6 +518,12 @@ const Environment = struct {
             },
         );
         env.wait(&env.manifest_log);
+
+        // The fuzzer runs in a single process, all checkpoints are trivially durable. Use
+        // free_set.mark_checkpoint_durable() instead of grid.mark_checkpoint_durable(); the
+        // latter requires passing a callback, which is called synchronously in fuzzers anyway.
+        env.grid.mark_checkpoint_not_durable();
+        env.grid.free_set.mark_checkpoint_durable();
 
         try env.verify();
     }
@@ -552,10 +576,11 @@ const Environment = struct {
                 .trace = test_trace,
                 .missing_blocks_max = 0,
                 .missing_tables_max = 0,
+                .blocks_released_prior_checkpoint_durability_max = 0,
             });
 
             test_manifest_log.deinit(env.allocator);
-            try test_manifest_log.init(env.allocator, test_grid, manifest_log_options);
+            try test_manifest_log.init(env.allocator, test_grid, &manifest_log_compaction_pace);
         }
 
         env.pending += 1;

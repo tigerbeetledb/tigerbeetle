@@ -43,7 +43,7 @@ pub const Quorums = @import("superblock_quorums.zig").QuorumsType(.{
 
 pub const SuperBlockVersion: u16 =
     // Make sure that data files created by development builds are distinguished through version.
-    if (constants.config.process.release.value == vsr.Release.minimum.value) 0 else 1;
+    if (constants.config.process.release.value == vsr.Release.minimum.value) 0 else 2;
 
 const vsr_headers_reserved_size = constants.sector_size -
     ((constants.view_change_headers_max * @sizeOf(vsr.Header)) % constants.sector_size);
@@ -165,10 +165,14 @@ pub const SuperBlockHeader = extern struct {
                     .header = vsr.Header.Prepare.root(options.cluster),
                     .parent_checkpoint_id = 0,
                     .grandparent_checkpoint_id = 0,
-                    .free_set_checksum = comptime vsr.checksum(&.{}),
-                    .free_set_last_block_checksum = 0,
-                    .free_set_last_block_address = 0,
-                    .free_set_size = 0,
+                    .free_set_blocks_acquired_checksum = comptime vsr.checksum(&.{}),
+                    .free_set_blocks_released_checksum = comptime vsr.checksum(&.{}),
+                    .free_set_blocks_acquired_last_block_checksum = 0,
+                    .free_set_blocks_released_last_block_checksum = 0,
+                    .free_set_blocks_acquired_last_block_address = 0,
+                    .free_set_blocks_released_last_block_address = 0,
+                    .free_set_blocks_acquired_size = 0,
+                    .free_set_blocks_released_size = 0,
                     .client_sessions_checksum = comptime vsr.checksum(&.{}),
                     .client_sessions_last_block_checksum = 0,
                     .client_sessions_last_block_address = 0,
@@ -209,16 +213,28 @@ pub const SuperBlockHeader = extern struct {
             assert(state.checkpoint.manifest_oldest_checksum_padding == 0);
             assert(state.checkpoint.manifest_newest_checksum_padding == 0);
             assert(state.checkpoint.snapshots_block_checksum_padding == 0);
-            assert(state.checkpoint.free_set_last_block_checksum_padding == 0);
+            assert(state.checkpoint.free_set_blocks_acquired_last_block_checksum_padding == 0);
+            assert(state.checkpoint.free_set_blocks_released_last_block_checksum_padding == 0);
+
             assert(state.checkpoint.client_sessions_last_block_checksum_padding == 0);
             assert(state.checkpoint.storage_size >= data_file_size_min);
 
-            if (state.checkpoint.free_set_last_block_address == 0) {
-                assert(state.checkpoint.free_set_last_block_checksum == 0);
-                assert(state.checkpoint.free_set_size == 0);
-                assert(state.checkpoint.free_set_checksum == comptime vsr.checksum(&.{}));
+            if (state.checkpoint.free_set_blocks_acquired_last_block_address == 0) {
+                assert(state.checkpoint.free_set_blocks_acquired_size == 0);
+                assert(state.checkpoint.free_set_blocks_acquired_checksum ==
+                    comptime vsr.checksum(&.{}));
+                assert(state.checkpoint.free_set_blocks_acquired_last_block_checksum == 0);
             } else {
-                assert(state.checkpoint.free_set_size > 0);
+                assert(state.checkpoint.free_set_blocks_acquired_size > 0);
+            }
+
+            if (state.checkpoint.free_set_blocks_released_last_block_address == 0) {
+                assert(state.checkpoint.free_set_blocks_released_size == 0);
+                assert(state.checkpoint.free_set_blocks_released_checksum ==
+                    comptime vsr.checksum(&.{}));
+                assert(state.checkpoint.free_set_blocks_released_last_block_checksum == 0);
+            } else {
+                assert(state.checkpoint.free_set_blocks_released_size > 0);
             }
 
             if (state.checkpoint.client_sessions_last_block_address == 0) {
@@ -297,11 +313,11 @@ pub const SuperBlockHeader = extern struct {
         }
     };
 
-    /// The content of CheckpointState is deterministic for the corresponding checkpoint.
+    /// CheckpointState for SuperBlockVersion=1 (and 0 for development builds).
     ///
-    /// This struct is sent in a `sync_checkpoint` message from a healthy replica to a syncing
-    /// replica.
-    pub const CheckpointState = extern struct {
+    /// We maintain this so replicas with SuperBlockVersion=2 are able to parse older SuperBlocks
+    /// (see `read_header_callback` for translation from CheckpointStateOld → CheckpointState).
+    pub const CheckpointStateOld = extern struct {
         /// The last prepare of the checkpoint committed to the state machine.
         /// At startup, replay the log hereafter.
         header: vsr.Header.Prepare,
@@ -356,13 +372,95 @@ pub const SuperBlockHeader = extern struct {
         /// The number of manifest blocks in the manifest log.
         manifest_block_count: u32,
 
-        /// All prepares between `CheckpointState.commit_min` (i.e. `op_checkpoint`) and
+        /// All prepares between `CheckpointStateOld.commit_min` (i.e. `op_checkpoint`) and
         /// `trigger_for_checkpoint(checkpoint_after(commit_min))` must be executed by this release.
         /// (Prepares with `operation=upgrade` are the exception – upgrades in the last
         /// `lsm_compaction_ops` before a checkpoint trigger may be replayed by a different release.
         release: vsr.Release,
 
         reserved: [472]u8 = [_]u8{0} ** 472,
+
+        comptime {
+            assert(@sizeOf(CheckpointStateOld) % @sizeOf(u128) == 0);
+            assert(@sizeOf(CheckpointStateOld) == 1024);
+            assert(stdx.no_padding(CheckpointStateOld));
+        }
+    };
+
+    /// The content of CheckpointState is deterministic for the corresponding checkpoint.
+    ///
+    /// This struct is sent in a `start_view` message from the primary to a syncing replica.
+    pub const CheckpointState = extern struct {
+        /// The last prepare of the checkpoint committed to the state machine.
+        /// At startup, replay the log hereafter.
+        header: vsr.Header.Prepare,
+
+        free_set_blocks_acquired_last_block_checksum: u128,
+        free_set_blocks_acquired_last_block_checksum_padding: u128 = 0,
+
+        free_set_blocks_released_last_block_checksum: u128,
+        free_set_blocks_released_last_block_checksum_padding: u128 = 0,
+
+        client_sessions_last_block_checksum: u128,
+        client_sessions_last_block_checksum_padding: u128 = 0,
+        manifest_oldest_checksum: u128,
+        manifest_oldest_checksum_padding: u128 = 0,
+        manifest_newest_checksum: u128,
+        manifest_newest_checksum_padding: u128 = 0,
+        snapshots_block_checksum: u128,
+        snapshots_block_checksum_padding: u128 = 0,
+
+        /// Checksum covering the entire encoded free set. Strictly speaking it is redundant:
+        /// free_set_last_block_checksum indirectly covers the same data. It is still useful
+        /// to protect from encoding-decoding bugs as a defense in depth.
+        free_set_blocks_acquired_checksum: u128,
+        free_set_blocks_released_checksum: u128,
+
+        /// Checksum covering the entire client sessions, as defense-in-depth.
+        client_sessions_checksum: u128,
+
+        /// The checkpoint_id() of the checkpoint which last updated our commit_min.
+        /// Following state sync, this is set to the last checkpoint that we skipped.
+        parent_checkpoint_id: u128,
+        /// The parent_checkpoint_id of the parent checkpoint.
+        /// TODO We might be able to remove this when
+        /// https://github.com/tigerbeetle/tigerbeetle/issues/1378 is fixed.
+        grandparent_checkpoint_id: u128,
+
+        free_set_blocks_acquired_last_block_address: u64,
+        free_set_blocks_released_last_block_address: u64,
+
+        client_sessions_last_block_address: u64,
+        manifest_oldest_address: u64,
+        manifest_newest_address: u64,
+        snapshots_block_address: u64,
+
+        // Logical storage size in bytes.
+        //
+        // If storage_size is less than the data file size, then the grid blocks beyond storage_size
+        // were used previously, but have since been freed.
+        //
+        // If storage_size is more than the data file size, then the data file might have been
+        // truncated/corrupted.
+        storage_size: u64,
+
+        // Size of the encoded trailers in bytes.
+        // It is equal to the sum of sizes of individual trailer blocks and is used for assertions.
+        free_set_blocks_acquired_size: u64,
+        free_set_blocks_released_size: u64,
+
+        client_sessions_size: u64,
+
+        /// The number of manifest blocks in the manifest log.
+        manifest_block_count: u32,
+
+        /// All prepares between `CheckpointState.commit_min` (i.e. `op_checkpoint`) and
+        /// `trigger_for_checkpoint(checkpoint_after(commit_min))` must be executed by this release.
+        /// (Prepares with `operation=upgrade` are the exception – upgrades in the last
+        /// `lsm_compaction_ops` before a checkpoint trigger may be replayed by a different release.
+        release: vsr.Release,
+
+        reserved: [408]u8 = [_]u8{0} ** 408,
 
         comptime {
             assert(@sizeOf(CheckpointState) % @sizeOf(u128) == 0);
@@ -413,6 +511,10 @@ pub const SuperBlockHeader = extern struct {
 
     pub fn checkpoint_id(superblock: *const SuperBlockHeader) u128 {
         return vsr.checksum(std.mem.asBytes(&superblock.vsr_state.checkpoint));
+    }
+
+    pub fn parent_checkpoint_id(superblock: *const SuperBlockHeader) u128 {
+        return superblock.vsr_state.checkpoint.parent_checkpoint_id;
     }
 
     /// Does not consider { checksum, copy } when comparing equality.
@@ -469,13 +571,36 @@ pub const SuperBlockHeader = extern struct {
         };
     }
 
-    pub fn free_set_reference(superblock: *const SuperBlockHeader) TrailerReference {
-        return .{
-            .checksum = superblock.vsr_state.checkpoint.free_set_checksum,
-            .last_block_address = superblock.vsr_state.checkpoint.free_set_last_block_address,
-            .last_block_checksum = superblock.vsr_state.checkpoint.free_set_last_block_checksum,
-            .trailer_size = superblock.vsr_state.checkpoint.free_set_size,
-        };
+    pub fn free_set_reference(
+        superblock: *const SuperBlockHeader,
+        bitset: vsr.FreeSet.BitsetKind,
+    ) TrailerReference {
+        switch (bitset) {
+            .blocks_acquired => {
+                return .{
+                    .checksum = superblock.vsr_state.checkpoint
+                        .free_set_blocks_acquired_checksum,
+                    .last_block_address = superblock.vsr_state.checkpoint
+                        .free_set_blocks_acquired_last_block_address,
+                    .last_block_checksum = superblock.vsr_state.checkpoint
+                        .free_set_blocks_acquired_last_block_checksum,
+                    .trailer_size = superblock.vsr_state.checkpoint
+                        .free_set_blocks_acquired_size,
+                };
+            },
+            .blocks_released => {
+                return .{
+                    .checksum = superblock.vsr_state.checkpoint
+                        .free_set_blocks_released_checksum,
+                    .last_block_address = superblock.vsr_state.checkpoint
+                        .free_set_blocks_released_last_block_address,
+                    .last_block_checksum = superblock.vsr_state.checkpoint
+                        .free_set_blocks_released_last_block_checksum,
+                    .trailer_size = superblock.vsr_state.checkpoint
+                        .free_set_blocks_released_size,
+                };
+            },
+        }
     }
 
     pub fn client_sessions_reference(superblock: *const SuperBlockHeader) TrailerReference {
@@ -739,10 +864,14 @@ pub fn SuperBlockType(comptime Storage: type) type {
                         .manifest_newest_checksum = 0,
                         .manifest_newest_address = 0,
                         .manifest_block_count = 0,
-                        .free_set_checksum = 0,
-                        .free_set_last_block_checksum = 0,
-                        .free_set_last_block_address = 0,
-                        .free_set_size = 0,
+                        .free_set_blocks_acquired_checksum = 0,
+                        .free_set_blocks_released_checksum = 0,
+                        .free_set_blocks_acquired_last_block_checksum = 0,
+                        .free_set_blocks_released_last_block_checksum = 0,
+                        .free_set_blocks_acquired_last_block_address = 0,
+                        .free_set_blocks_released_last_block_address = 0,
+                        .free_set_blocks_acquired_size = 0,
+                        .free_set_blocks_released_size = 0,
                         .client_sessions_checksum = 0,
                         .client_sessions_last_block_checksum = 0,
                         .client_sessions_last_block_address = 0,
@@ -818,7 +947,10 @@ pub fn SuperBlockType(comptime Storage: type) type {
             sync_op_min: u64,
             sync_op_max: u64,
             manifest_references: ManifestReferences,
-            free_set_reference: TrailerReference,
+            free_set_references: struct {
+                blocks_acquired: TrailerReference,
+                blocks_released: TrailerReference,
+            },
             client_sessions_reference: TrailerReference,
             storage_size: u64,
             release: vsr.Release,
@@ -842,7 +974,8 @@ pub fn SuperBlockType(comptime Storage: type) type {
             assert(update.storage_size <= superblock.storage_size_limit);
             assert(update.storage_size >= data_file_size_min);
             assert((update.storage_size == data_file_size_min) ==
-                update.free_set_reference.empty());
+                (update.free_set_references.blocks_acquired.empty() and
+                update.free_set_references.blocks_released.empty()));
 
             // NOTE: Within the vsr_state.checkpoint assignment below, do not read from vsr_state
             // directly. A miscompilation bug (as of Zig 0.11.0) causes fields to receive the
@@ -855,19 +988,38 @@ pub fn SuperBlockType(comptime Storage: type) type {
                 .header = update.header,
                 .parent_checkpoint_id = superblock.staging.checkpoint_id(),
                 .grandparent_checkpoint_id = vsr_state_staging.checkpoint.parent_checkpoint_id,
-                .free_set_checksum = update.free_set_reference.checksum,
-                .free_set_last_block_checksum = update.free_set_reference.last_block_checksum,
-                .free_set_last_block_address = update.free_set_reference.last_block_address,
-                .free_set_size = update.free_set_reference.trailer_size,
+
+                .free_set_blocks_acquired_checksum = update.free_set_references
+                    .blocks_acquired.checksum,
+                .free_set_blocks_released_checksum = update.free_set_references
+                    .blocks_released.checksum,
+
+                .free_set_blocks_acquired_size = update.free_set_references
+                    .blocks_acquired.trailer_size,
+                .free_set_blocks_released_size = update.free_set_references
+                    .blocks_released.trailer_size,
+
+                .free_set_blocks_acquired_last_block_checksum = update.free_set_references
+                    .blocks_acquired.last_block_checksum,
+                .free_set_blocks_released_last_block_checksum = update.free_set_references
+                    .blocks_released.last_block_checksum,
+
+                .free_set_blocks_acquired_last_block_address = update.free_set_references
+                    .blocks_acquired.last_block_address,
+                .free_set_blocks_released_last_block_address = update.free_set_references
+                    .blocks_released.last_block_address,
+
                 .client_sessions_checksum = update_client_sessions.checksum,
                 .client_sessions_last_block_checksum = update_client_sessions.last_block_checksum,
                 .client_sessions_last_block_address = update_client_sessions.last_block_address,
                 .client_sessions_size = update.client_sessions_reference.trailer_size,
+
                 .manifest_oldest_checksum = update.manifest_references.oldest_checksum,
                 .manifest_oldest_address = update.manifest_references.oldest_address,
                 .manifest_newest_checksum = update.manifest_references.newest_checksum,
                 .manifest_newest_address = update.manifest_references.newest_address,
                 .manifest_block_count = update.manifest_references.block_count,
+
                 .storage_size = update.storage_size,
                 .snapshots_block_checksum = vsr_state_staging.checkpoint.snapshots_block_checksum,
                 .snapshots_block_address = vsr_state_staging.checkpoint.snapshots_block_address,
@@ -1057,7 +1209,6 @@ pub fn SuperBlockType(comptime Storage: type) type {
 
             assert(context.copy.? < constants.superblock_copies);
             superblock.staging.copy = context.copy.?;
-
             // Updating the copy number should not affect the checksum, which was previously set:
             assert(superblock.staging.valid_checksum());
 
@@ -1191,7 +1342,8 @@ pub fn SuperBlockType(comptime Storage: type) type {
                     assert(working.sequence == 1);
                     assert(working.vsr_state.checkpoint.header.checksum ==
                         vsr.Header.Prepare.root(working.cluster).checksum);
-                    assert(working.vsr_state.checkpoint.free_set_size == 0);
+                    assert(working.vsr_state.checkpoint.free_set_blocks_acquired_size == 0);
+                    assert(working.vsr_state.checkpoint.free_set_blocks_released_size == 0);
                     assert(working.vsr_state.checkpoint.client_sessions_size == 0);
                     assert(working.vsr_state.checkpoint.storage_size == data_file_size_min);
                     assert(working.vsr_state.checkpoint.header.op == 0);
@@ -1211,13 +1363,65 @@ pub fn SuperBlockType(comptime Storage: type) type {
                 superblock.staging.* = working.*;
 
                 const working_checkpoint = &superblock.working.vsr_state.checkpoint;
+                const staging_checkpoint = &superblock.staging.vsr_state.checkpoint;
+
+                // The SuperBlock on disk is an older version wherein @TypeOf(VSRState.checkpoint)
+                // is CheckpointStateOld. Translate CheckpointStateOld → CheckpointState (zeroing
+                // out new fields) and update the working and staging superblocks.
+                if (working.version < SuperBlockVersion) {
+                    const checkpoint_old: *const vsr.CheckpointStateOld =
+                        @ptrCast(&working.vsr_state.checkpoint);
+                    const checkpoint_new = vsr.CheckpointState{
+                        .header = checkpoint_old.header,
+                        .parent_checkpoint_id = checkpoint_old.parent_checkpoint_id,
+                        .grandparent_checkpoint_id = checkpoint_old.grandparent_checkpoint_id,
+
+                        .free_set_blocks_acquired_checksum = checkpoint_old.free_set_checksum,
+                        .free_set_blocks_released_checksum = comptime vsr.checksum(&.{}),
+                        .free_set_blocks_acquired_last_block_checksum = checkpoint_old
+                            .free_set_last_block_checksum,
+                        .free_set_blocks_released_last_block_checksum = 0,
+                        .free_set_blocks_acquired_last_block_address = checkpoint_old
+                            .free_set_last_block_address,
+                        .free_set_blocks_released_last_block_address = 0,
+                        .free_set_blocks_acquired_size = checkpoint_old.free_set_size,
+                        .free_set_blocks_released_size = 0,
+
+                        .client_sessions_checksum = checkpoint_old.client_sessions_checksum,
+                        .client_sessions_last_block_checksum = checkpoint_old
+                            .client_sessions_last_block_checksum,
+                        .client_sessions_last_block_address = checkpoint_old
+                            .client_sessions_last_block_address,
+                        .client_sessions_size = checkpoint_old.client_sessions_size,
+
+                        .manifest_oldest_checksum = checkpoint_old.manifest_oldest_checksum,
+                        .manifest_oldest_address = checkpoint_old.manifest_oldest_address,
+                        .manifest_newest_checksum = checkpoint_old.manifest_newest_checksum,
+                        .manifest_newest_address = checkpoint_old.manifest_newest_address,
+                        .manifest_block_count = checkpoint_old.manifest_block_count,
+
+                        .snapshots_block_checksum = checkpoint_old.snapshots_block_checksum,
+                        .snapshots_block_address = checkpoint_old.snapshots_block_address,
+
+                        .storage_size = data_file_size_min,
+                        .release = checkpoint_old.release,
+                    };
+
+                    working_checkpoint.* = checkpoint_new;
+                    staging_checkpoint.* = checkpoint_new;
+                    superblock.working.version = SuperBlockVersion;
+                    superblock.staging.version = SuperBlockVersion;
+                }
+
                 log.debug(
                     "{[replica]?}: " ++
                         "{[caller]s}: installed working superblock: checksum={[checksum]x:0>32} " ++
                         "sequence={[sequence]} " ++
                         "release={[release]} " ++
                         "cluster={[cluster]x:0>32} replica_id={[replica_id]} " ++
-                        "size={[size]} free_set_size={[free_set_size]} " ++
+                        "size={[size]} " ++
+                        "free_set_blocks_acquired_size={[free_set_blocks_acquired_size]} " ++
+                        "free_set_blocks_released_size={[free_set_blocks_released_size]} " ++
                         "client_sessions_size={[client_sessions_size]} " ++
                         "checkpoint_id={[checkpoint_id]x:0>32} " ++
                         "commit_min_checksum={[commit_min_checksum]} commit_min={[commit_min]} " ++
@@ -1239,7 +1443,10 @@ pub fn SuperBlockType(comptime Storage: type) type {
                         .cluster = superblock.working.cluster,
                         .replica_id = superblock.working.vsr_state.replica_id,
                         .size = working_checkpoint.storage_size,
-                        .free_set_size = working_checkpoint.free_set_size,
+                        .free_set_blocks_acquired_size = working_checkpoint
+                            .free_set_blocks_acquired_size,
+                        .free_set_blocks_released_size = working_checkpoint
+                            .free_set_blocks_released_size,
                         .client_sessions_size = working_checkpoint.client_sessions_size,
                         .checkpoint_id = superblock.working.checkpoint_id(),
                         .commit_min_checksum = working_checkpoint.header.checksum,

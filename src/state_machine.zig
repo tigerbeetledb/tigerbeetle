@@ -3404,6 +3404,7 @@ const TestContext = struct {
             .trace = &ctx.trace,
             .missing_blocks_max = 0,
             .missing_tables_max = 0,
+            .blocks_released_prior_checkpoint_durability_max = 0,
         });
         errdefer ctx.grid.deinit(allocator);
 

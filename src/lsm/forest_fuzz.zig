@@ -33,6 +33,7 @@ const FuzzOpAction = union(enum) {
     compact: struct {
         op: u64,
         checkpoint: bool,
+        checkpoint_durable: bool,
     },
     put_account: struct {
         op: u64,
@@ -136,6 +137,9 @@ const Environment = struct {
             .trace = &env.trace,
             .missing_blocks_max = 0,
             .missing_tables_max = 0,
+            .blocks_released_prior_checkpoint_durability_max = Forest
+                .compaction_blocks_released_per_pipeline_max() +
+                Grid.free_set_checkpoints_blocks_max(constants.storage_size_limit_default),
         });
 
         env.scan_lookup_buffer = try allocator.alloc(
@@ -290,7 +294,12 @@ const Environment = struct {
             },
             .view_attributes = null,
             .manifest_references = env.forest.manifest_log.checkpoint_references(),
-            .free_set_reference = env.grid.free_set_checkpoint.checkpoint_reference(),
+            .free_set_references = .{
+                .blocks_acquired = env.grid
+                    .free_set_checkpoint_blocks_acquired.checkpoint_reference(),
+                .blocks_released = env.grid
+                    .free_set_checkpoint_blocks_released.checkpoint_reference(),
+            },
             .client_sessions_reference = .{
                 .last_block_checksum = 0,
                 .last_block_address = 0,
@@ -306,6 +315,7 @@ const Environment = struct {
         });
         try env.tick_until_state_change(.superblock_checkpoint, .fuzzing);
 
+        env.grid.mark_checkpoint_not_durable();
         env.checkpoint_op = null;
     }
 
@@ -716,8 +726,16 @@ const Environment = struct {
     fn apply_op_action(env: *Environment, fuzz_op_action: FuzzOpAction, model: *Model) !void {
         switch (fuzz_op_action) {
             .compact => |c| {
+
+                // Checkpoint is marked durable *before* a replica compacts the (pipeline + 1)ᵗʰ
+                // op. This is because `blocks_released_prior_checkpoint_durability` in FreeSet
+                // is sized according to the maximum number of blocks released by a pipeline of ops
+                // (see `blocks_released_prior_checkpoint_durability_max` in vsr.zig).
+                if (c.checkpoint_durable) env.grid.free_set.mark_checkpoint_durable();
+
                 try env.compact(c.op);
                 if (c.checkpoint) {
+                    assert(!c.checkpoint_durable);
                     try model.checkpoint(c.op);
                     try env.checkpoint(c.op);
                 }
@@ -906,6 +924,7 @@ pub fn generate_fuzz_ops(random: std.rand.Random, fuzz_op_count: usize) ![]const
             .compact => action: {
                 const action = generate_compact(.{ .op = op, .persisted_op = persisted_op });
                 if (action.compact.checkpoint) {
+                    assert(!action.compact.checkpoint_durable);
                     persisted_op = op - constants.lsm_compaction_ops;
                 }
                 op += 1;
@@ -1016,9 +1035,28 @@ fn generate_compact(options: struct { op: u64, persisted_op: u64 }) FuzzOpAction
         options.op == vsr.Checkpoint.trigger_for_checkpoint(
         vsr.Checkpoint.checkpoint_after(options.persisted_op),
     );
+
+    // Checkpoint is considered durable when a replica is committing/compacting the (pipeline + 1)ᵗʰ
+    // prepare after checkpoint trigger. See `op_repair_min` in `replica.zig` for more context.
+    const checkpoint_durable = checkpoint_durable: {
+        if (vsr.Checkpoint.trigger_for_checkpoint(options.persisted_op)) |trigger| {
+            if (options.op == trigger + constants.pipeline_prepare_queue_max + 1)
+                break :checkpoint_durable true
+            else
+                break :checkpoint_durable false;
+        } else {
+            assert(options.persisted_op == 0);
+            if (options.op == 1)
+                break :checkpoint_durable true
+            else
+                break :checkpoint_durable false;
+        }
+    };
+
     return FuzzOpAction{ .compact = .{
         .op = options.op,
         .checkpoint = checkpoint,
+        .checkpoint_durable = checkpoint_durable,
     } };
 }
 

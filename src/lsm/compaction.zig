@@ -1009,7 +1009,7 @@ pub fn CompactionType(
         //   - there's no incomplete output value blocks.
         //
         // In other words, the only compaction state that gets carried over to the next beat is a
-        // partially full index block. The current beat must end with writing a data block, and the
+        // partially full index block. The current beat must end with writing a value block, and the
         // next beat must start with re-reading level_a and level_b index and value blocks.
         fn compaction_dispatch(compaction: *Compaction) void {
             switch (compaction.stage) {
@@ -1492,17 +1492,16 @@ pub fn CompactionType(
             const index_schema = schema.TableIndex.from(index_block);
             const index_block_address = Table.block_address(index_block);
             const data_block_addresses = index_schema.data_addresses_used(index_block);
-            // Tables are release when the index block is no longer needed. Given that the same
+
+            // Tables are released when the index block is no longer needed. Given that the same
             // index block can get re-read across the bar, the same table can be released twice.
             if (compaction.grid.free_set.is_released(index_block_address)) {
                 for (data_block_addresses) |address| {
                     assert(compaction.grid.free_set.is_released(address));
                 }
             } else {
-                for (data_block_addresses) |address| {
-                    compaction.grid.release(address);
-                }
-                compaction.grid.release(index_block_address);
+                compaction.grid.release(data_block_addresses);
+                compaction.grid.release(&.{index_block_address});
             }
         }
 

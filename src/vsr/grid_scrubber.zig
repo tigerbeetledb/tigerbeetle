@@ -114,7 +114,8 @@ pub fn GridScrubberType(comptime Forest: type) type {
             /// The manifest log tour iterates manifest blocks in reverse order.
             /// (To ensure that manifest compaction doesn't lead to missed blocks.)
             manifest_log: struct { iterator: ManifestBlockIterator = .init },
-            free_set: struct { index: u32 = 0 },
+            free_set_blocks_acquired: struct { index: u32 = 0 },
+            free_set_blocks_released: struct { index: u32 = 0 },
             client_sessions: struct { index: u32 = 0 },
         },
 
@@ -222,12 +223,12 @@ pub fn GridScrubberType(comptime Forest: type) type {
             }
         }
 
-        /// Cancel queued reads to blocks that will be released by the imminent checkpoint.
-        /// (The read still runs, but the results will be ignored.)
-        pub fn checkpoint(scrubber: *GridScrubber) void {
+        /// Cancel queued reads to blocks that will be freed, now that the current checkpoint is
+        /// durable. (The read still runs, but the results will be ignored.)
+        pub fn checkpoint_durable(scrubber: *GridScrubber) void {
             assert(scrubber.superblock.opened);
-            // GridScrubber.checkpoint() is called immediately before FreeSet.checkpoint().
-            // All released blocks are about to be freed.
+            // GridScrubber.checkpoint_durable() is called immediately before
+            // FreeSet.mark_checkpoint_durable(). All released blocks are about to be freed.
             assert(scrubber.forest.grid.callback == .none);
 
             for ([_]FIFOType(Read){ scrubber.reads_busy, scrubber.reads_done }) |reads_fifo| {
@@ -235,8 +236,13 @@ pub fn GridScrubberType(comptime Forest: type) type {
                 while (reads_iterator) |read| : (reads_iterator = read.next) {
                     if (read.status == .repair) {
                         assert(!scrubber.forest.grid.free_set.is_free(read.read.address));
-
-                        if (scrubber.forest.grid.free_set.is_released(read.read.address)) {
+                        // Use `to_be_freed_at_checkpoint_durability` instead of `is_released`;
+                        // the latter also contains the blocks that will be released when the
+                        // *next* checkpoint becomes durable. We only need to abort scrubbing for
+                        // blocks that are just about to be freed.
+                        if (scrubber.forest.grid.free_set
+                            .to_be_freed_at_checkpoint_durability(read.read.address))
+                        {
                             read.status = .released;
                         }
                     }
@@ -247,7 +253,9 @@ pub fn GridScrubberType(comptime Forest: type) type {
                 const index_address = scrubber.tour.table_data.index_address;
                 assert(!scrubber.forest.grid.free_set.is_free(index_address));
 
-                if (scrubber.forest.grid.free_set.is_released(index_address)) {
+                if (scrubber.forest.grid.free_set
+                    .to_be_freed_at_checkpoint_durability(index_address))
+                {
                     // Skip scrubbing the table data, since the table is about to be released.
                     scrubber.tour = .table_index;
                 }
@@ -455,16 +463,16 @@ pub fn GridScrubberType(comptime Forest: type) type {
                         .block_type = .manifest,
                     };
                 } else {
-                    tour.* = .{ .free_set = .{} };
+                    tour.* = .{ .free_set_blocks_acquired = .{} };
                 }
             }
 
-            if (tour.* == .free_set) {
-                const free_set_trailer = &scrubber.forest.grid.free_set_checkpoint;
+            if (tour.* == .free_set_blocks_acquired) {
+                const free_set_trailer = &scrubber.forest.grid.free_set_checkpoint_blocks_acquired;
                 if (free_set_trailer.callback != .none) return null;
-                if (tour.free_set.index < free_set_trailer.block_count()) {
-                    const index = tour.free_set.index;
-                    tour.free_set.index += 1;
+                if (tour.free_set_blocks_acquired.index < free_set_trailer.block_count()) {
+                    const index = tour.free_set_blocks_acquired.index;
+                    tour.free_set_blocks_acquired.index += 1;
                     return .{
                         .block_checksum = free_set_trailer.block_checksums[index],
                         .block_address = free_set_trailer.block_addresses[index],
@@ -473,7 +481,26 @@ pub fn GridScrubberType(comptime Forest: type) type {
                 } else {
                     // A checkpoint can reduce the number of trailer blocks while we are scrubbing
                     // the trailer.
-                    maybe(tour.free_set.index > free_set_trailer.block_count());
+                    maybe(tour.free_set_blocks_acquired.index > free_set_trailer.block_count());
+                    tour.* = .{ .free_set_blocks_released = .{} };
+                }
+            }
+
+            if (tour.* == .free_set_blocks_released) {
+                const free_set_trailer = &scrubber.forest.grid.free_set_checkpoint_blocks_released;
+                if (free_set_trailer.callback != .none) return null;
+                if (tour.free_set_blocks_released.index < free_set_trailer.block_count()) {
+                    const index = tour.free_set_blocks_released.index;
+                    tour.free_set_blocks_released.index += 1;
+                    return .{
+                        .block_checksum = free_set_trailer.block_checksums[index],
+                        .block_address = free_set_trailer.block_addresses[index],
+                        .block_type = .free_set,
+                    };
+                } else {
+                    // A checkpoint can reduce the number of trailer blocks while we are scrubbing
+                    // the trailer.
+                    maybe(tour.free_set_blocks_released.index > free_set_trailer.block_count());
                     tour.* = .{ .client_sessions = .{} };
                 }
             }

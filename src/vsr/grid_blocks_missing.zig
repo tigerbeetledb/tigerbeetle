@@ -36,7 +36,8 @@ pub const GridBlocksMissing = struct {
         /// Transitions:
         /// - Initial state is `waiting`.
         /// - `waiting → writing` when the block arrives and begins to repair.
-        /// - `writing → aborting` when the (writing) block is released by the checkpoint.
+        /// - `writing → aborting` when checkpoint becomes durable and the (writing) block is to be
+        ///    freed.
         state: enum { waiting, writing, aborting } = .waiting,
     };
 
@@ -103,7 +104,7 @@ pub const GridBlocksMissing = struct {
     faulty_tables: FIFOType(RepairTable) = .{ .name = "grid_missing_blocks_tables" },
     faulty_tables_free: FIFOType(RepairTable) = .{ .name = "grid_missing_blocks_tables_free" },
 
-    checkpointing: ?struct {
+    checkpoint_durable: ?struct {
         /// The number of faulty_blocks with state=aborting.
         aborting: usize,
     } = null,
@@ -164,7 +165,7 @@ pub const GridBlocksMissing = struct {
                     if (requests_count == requests.len) break;
                 },
                 .writing => {},
-                .aborting => assert(queue.checkpointing.?.aborting > 0),
+                .aborting => assert(queue.checkpoint_durable.?.aborting > 0),
             }
         }
 
@@ -336,7 +337,7 @@ pub const GridBlocksMissing = struct {
         queue.release_fault(fault_index);
 
         if (fault.state == .aborting) {
-            queue.checkpointing.?.aborting -= 1;
+            queue.checkpoint_durable.?.aborting -= 1;
             return;
         }
 
@@ -429,8 +430,6 @@ pub const GridBlocksMissing = struct {
     }
 
     pub fn cancel(queue: *GridBlocksMissing) void {
-        assert(queue.checkpointing == null);
-
         queue.faulty_blocks.clearRetainingCapacity();
         while (queue.faulty_tables.pop()) |table| {
             queue.faulty_tables_free.push(table);
@@ -443,8 +442,12 @@ pub const GridBlocksMissing = struct {
         };
     }
 
-    pub fn checkpoint_commence(queue: *GridBlocksMissing, free_set: *const vsr.FreeSet) void {
-        assert(queue.checkpointing == null);
+    /// Aborts queued repairs to blocks to be freed, now that the current checkpoint is durable.
+    pub fn checkpoint_durable_commence(
+        queue: *GridBlocksMissing,
+        free_set: *const vsr.FreeSet,
+    ) void {
+        assert(queue.checkpoint_durable == null);
         assert(queue.faulty_blocks.count() ==
             queue.enqueued_blocks_single + queue.enqueued_blocks_table);
 
@@ -455,8 +458,9 @@ pub const GridBlocksMissing = struct {
             const fault_address = fault_entry.key_ptr.*;
             assert(!free_set.is_free(fault_address));
             assert(fault_entry.value_ptr.state != .aborting);
-
-            if (free_set.is_released(fault_address)) {
+            // Use `to_be_freed_at_checkpoint_durability` instead of `is_released`; the latter also
+            // contains the blocks that will be released when the *next* checkpoint becomes durable.
+            if (free_set.to_be_freed_at_checkpoint_durability(fault_address)) {
                 switch (fault_entry.value_ptr.state) {
                     .waiting => {
                         faulty_blocks.index -= 1;
@@ -476,7 +480,7 @@ pub const GridBlocksMissing = struct {
         while (queue.faulty_tables.pop()) |table| {
             assert(!free_set.is_free(table.index_address));
 
-            if (free_set.is_released(table.index_address)) {
+            if (free_set.to_be_freed_at_checkpoint_durability(table.index_address)) {
                 queue.faulty_tables_free.push(table);
             } else {
                 tables.push(table);
@@ -484,18 +488,18 @@ pub const GridBlocksMissing = struct {
         }
         queue.faulty_tables = tables;
 
-        queue.checkpointing = .{ .aborting = aborting };
+        queue.checkpoint_durable = .{ .aborting = aborting };
     }
 
-    /// Returns `true` when the `state≠waiting` faults for blocks that are staged to be
-    /// released have finished. (All other writes can safely complete after the checkpoint.)
-    pub fn checkpoint_complete(queue: *GridBlocksMissing) bool {
-        assert(queue.checkpointing != null);
+    /// Returns `true` when the `state == aborting` faults for blocks to be freed at checkpoint
+    /// durability have finished. (All other writes can safely complete after checkpoint durability)
+    pub fn checkpoint_durable_complete(queue: *GridBlocksMissing) bool {
+        assert(queue.checkpoint_durable != null);
         assert(queue.faulty_blocks.count() ==
             queue.enqueued_blocks_single + queue.enqueued_blocks_table);
 
-        if (queue.checkpointing.?.aborting == 0) {
-            queue.checkpointing = null;
+        if (queue.checkpoint_durable.?.aborting == 0) {
+            queue.checkpoint_durable = null;
 
             var faulty_blocks = queue.faulty_blocks.iterator();
             while (faulty_blocks.next()) |fault_entry| {

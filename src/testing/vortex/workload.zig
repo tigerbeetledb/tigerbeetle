@@ -18,7 +18,7 @@
 //!    back on its stdout as:
 //!    * the _operation_ (1 byte)
 //!    * the _result count_ (4 bytes), and
-//!    * the results (resulgt count * size of result pair), where each pair holds an index and a
+//!    * the results (result count * size of result pair), where each pair holds an index and a
 //!      result enum value (see `src/tigerbeetle.zig`)
 //! 3. The workload receives the results, and expects them to be of the same operation type as
 //!    originally requested. There might be fewer results than events, because clients can omit
