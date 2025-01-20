@@ -22,6 +22,7 @@ const StateCheckerType = @import("cluster/state_checker.zig").StateCheckerType;
 const StorageChecker = @import("cluster/storage_checker.zig").StorageChecker;
 const GridChecker = @import("cluster/grid_checker.zig").GridChecker;
 const ManifestCheckerType = @import("cluster/manifest_checker.zig").ManifestCheckerType;
+const JournalCheckerType = @import("cluster/journal_checker.zig").JournalCheckerType;
 
 const vsr = @import("../vsr.zig");
 pub const ReplicaFormat = vsr.ReplicaFormatType(Storage);
@@ -63,6 +64,7 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
         pub const Client = vsr.ClientType(StateMachine, MessageBus, Time);
         pub const StateChecker = StateCheckerType(Client, Replica);
         pub const ManifestChecker = ManifestCheckerType(StateMachine.Forest);
+        pub const JournalChecker = JournalCheckerType(Replica);
 
         pub const Options = struct {
             cluster_id: u128,
@@ -461,6 +463,10 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
                         .up => |up| {
                             assert(!up.paused);
                             replica.tick();
+
+                            // For performance, don't run every tick.
+                            if (i % 100 == 0) JournalChecker.check(replica);
+
                             cluster.state_checker.check_state(replica.replica) catch |err| {
                                 fatal(.correctness, "state checker error: {}", .{err});
                             };
@@ -623,7 +629,7 @@ pub fn ClusterType(comptime StateMachineType: anytype) type {
         /// version, this allows the replica to clean up properly (e.g. release Message's via
         /// `defer`).
         fn replica_release_execute(cluster: *Cluster, replica_index: u8) void {
-            const replica = cluster.replicas[replica_index];
+            const replica = &cluster.replicas[replica_index];
             assert(cluster.replica_health[replica_index] == .up);
 
             const release = cluster.replica_upgrades[replica_index].?;
