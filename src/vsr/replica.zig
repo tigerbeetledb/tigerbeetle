@@ -819,6 +819,7 @@ pub fn ReplicaType(
             // Asynchronously open the free set and then the (Forest inside) StateMachine so that we
             // can repair grid blocks if necessary:
             self.grid.open(grid_open_callback);
+            self.invariants();
         }
 
         fn superblock_open_callback(superblock_context: *SuperBlock.Context) void {
@@ -1312,6 +1313,10 @@ pub fn ReplicaType(
             }
         }
 
+        pub fn invariants(self: *const Replica) void {
+            assert(self.journal.header_with_op(self.op) != null);
+        }
+
         /// Time is measured in logical ticks that are incremented on every call to tick().
         /// This eliminates a dependency on the system time and enables deterministic testing.
         pub fn tick(self: *Replica) void {
@@ -1321,6 +1326,7 @@ pub fn ReplicaType(
             // delay the delivery of messages (e.g. a prepare_ok from the primary to itself) and
             // decrease throughput significantly.
             assert(self.loopback_queue == null);
+            defer self.invariants();
 
             // TODO Replica owns Time; should it tick() here instead of Clock?
             self.clock.tick();
@@ -1372,6 +1378,7 @@ pub fn ReplicaType(
             assert(self.opened);
             assert(self.loopback_queue == null);
             assert(message.references > 0);
+            defer self.invariants();
 
             // Switch on the header type so that we don't log opaque bytes for the per-command data.
             switch (message.header.into_any()) {
@@ -1633,6 +1640,17 @@ pub fn ReplicaType(
             assert(message.header.command == .prepare);
             assert(message.header.replica < self.replica_count);
             assert(message.header.operation != .reserved);
+
+            // Sanity check --- if the prepare is definitely from the current log-wrap, it should be
+            // appended.
+            defer {
+                if (self.status == .normal and message.header.view == self.view and
+                    message.header.op > self.op_checkpoint() and
+                    message.header.op <= self.op_checkpoint_next_trigger())
+                {
+                    assert(self.journal.has_header(message.header));
+                }
+            }
 
             // Replication balances two goals:
             // - replicate anything that the next replica is likely missing,
