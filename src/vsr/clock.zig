@@ -263,24 +263,16 @@ pub fn ClockType(comptime Time: type) type {
                 return;
             }
 
-            // We may receive delayed packets after a reboot, in which case m0/m2 may be invalid:
+            // The window was reset between a ping and the corresponding pong.
             if (m0 < self.window.monotonic) {
-                log.warn("{}: learn: m0={} < window.monotonic={}", .{
+                log.debug("{}: learn: m0={} < window.monotonic={}", .{
                     self.replica,
                     m0,
                     self.window.monotonic,
                 });
                 return;
             }
-
-            if (m2 < self.window.monotonic) {
-                log.warn("{}: learn: m2={} < window.monotonic={}", .{
-                    self.replica,
-                    m2,
-                    self.window.monotonic,
-                });
-                return;
-            }
+            assert(m2 >= self.window.monotonic); // Guaranteed by monotonicity of our local Time.
 
             const elapsed: u64 = m2 - self.window.monotonic;
             if (elapsed > window_max) {
@@ -962,7 +954,7 @@ test "clock: fuzz test" {
     var min_clock_offset: u64 = 1_000_000_000;
     var simulator = try ClockSimulator.init(std.testing.allocator, .{
         .network_options = .{
-            .node_count = 3,
+            .node_count = clock_count,
             .client_count = 0,
             .seed = seed,
 
